@@ -1,0 +1,368 @@
+{
+ "cases": [
+  {
+   "case": {
+    "Reference No.": "AMLS2608022",
+    "業務類型": "海運",
+    "方向": "出口",
+    "狀態": "已開票",
+    "Shipper": "INFOACTION TENOLOGY,INC.",
+    "Consignee": "SCREENBEAM INC",
+    "Notify Party": "",
+    "POL": "HONG KONG",
+    "POD": "OAKLAND",
+    "Final Destination": "OAKLAND",
+    "Flight／Vessel＋Voyage": "EVER MACRO / 1372-009E",
+    "ETD": "2026-08-18",
+    "ETA": "2026-09-16",
+    "PCS": 173,
+    "Gross Weight": 1477.84,
+    "Chargeable Weight／CBM": 11.44,
+    "MAWB／MBL No.": "FHKOAK26024888",
+    "HAWB／HBL No.": "AMLS2608022",
+    "Booking／S/O No.": "",
+    "收款狀態": "未收款",
+    "付款狀態": "未付款"
+   },
+   "charges": [
+    {
+     "Charge 名稱": "OCEAN FREIGHT CHARGE",
+     "CURR": "USD",
+     "PRICE": 100,
+     "UNIT": "CBM",
+     "QTY": 11.44,
+     "AMOUNT (HKD)": 8980.4,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "ADMINISTRATION CHARGE",
+     "CURR": "USD",
+     "PRICE": 15,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 117.75,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "AMS FEE",
+     "CURR": "USD",
+     "PRICE": 51.61,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 405.1385,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "CFS CHARGE",
+     "CURR": "USD",
+     "PRICE": 25.55,
+     "UNIT": "CBM",
+     "QTY": 11.44,
+     "AMOUNT (HKD)": 2294.4922,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "DELIVERY CHARGE",
+     "CURR": "USD",
+     "PRICE": 180,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 1413.0,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "DOCUMENTATION CHARGE",
+     "CURR": "USD",
+     "PRICE": 77.42,
+     "UNIT": "SET",
+     "QTY": 1,
+     "AMOUNT (HKD)": 607.747,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "HANDLING CHARGE",
+     "CURR": "USD",
+     "PRICE": 38.71,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 303.8735,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "REGRISTRATION FEE",
+     "CURR": "USD",
+     "PRICE": 94.19,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 739.3915,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "PALLET FEE",
+     "CURR": "USD",
+     "PRICE": 64.52,
+     "UNIT": "PLT",
+     "QTY": 2,
+     "AMOUNT (HKD)": 1012.964,
+     "收費類別": "向客收費"
+    }
+   ],
+   "expected_total_hkd": 15874.76,
+   "invoice": {
+    "Invoice No.": "AMLS2608022",
+    "Invoice Date": "2026-08-18",
+    "Total": 15874.7567,
+    "貨幣": "HKD",
+    "付款狀態": "未收",
+    "發票類別": "客人發票"
+   },
+   "source": "INVOICE_FOR_EXPORT_OCEAN_SHPT.xlsx OCEAN sheet (AMLS2608022, 2026-08-18); USD charges converted at 7.85 (rate implied by AMLA2606040 sample, not stated in this file — 待核實）"
+  },
+  {
+   "case": {
+    "Reference No.": "AML2610063",
+    "業務類型": "空運",
+    "方向": "進口",
+    "狀態": "已開票",
+    "Shipper": "TENSO,INC.",
+    "Consignee": "ALPHA MASTER LOGISTICS LTD.",
+    "Notify Party": "",
+    "POL": "NRT",
+    "POD": "HKG",
+    "Final Destination": "",
+    "Flight／Vessel＋Voyage": "JL6781",
+    "ETD": "",
+    "ETA": "2026-10-28",
+    "PCS": 45,
+    "Gross Weight": 653.0,
+    "Chargeable Weight／CBM": 1462.5,
+    "MAWB／MBL No.": "131-26042590",
+    "HAWB／HBL No.": "SBS-0002 3469",
+    "Booking／S/O No.": "",
+    "收款狀態": "未收款",
+    "付款狀態": "未付款"
+   },
+   "charges": [
+    {
+     "Charge 名稱": "TERMINAL CHARGE",
+     "CURR": "HKD",
+     "PRICE": 1.68,
+     "UNIT": "KG",
+     "QTY": 653,
+     "AMOUNT (HKD)": 1097.04,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "AIRLINES DOCUMENT CHARGE",
+     "CURR": "HKD",
+     "PRICE": 13,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 13,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "IMPORT DECLARATION CHARGE",
+     "CURR": "HKD",
+     "PRICE": 150,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 150,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "DELIVERY CHARGE",
+     "CURR": "HKD",
+     "PRICE": 0.7,
+     "UNIT": "KG",
+     "QTY": 1170,
+     "AMOUNT (HKD)": 819,
+     "收費類別": "向客收費"
+    }
+   ],
+   "expected_total_hkd": 2079.04,
+   "invoice": {
+    "Invoice No.": "AML2610063",
+    "Invoice Date": "2026-10-28",
+    "Total": 2079.04,
+    "貨幣": "HKD",
+    "付款狀態": "未收",
+    "發票類別": "客人發票"
+   },
+   "source": "INVOICE_FOR_IMPORT_AIR_SHPT.xlsx (AML2610063, 2026-10-28)"
+  },
+  {
+   "case": {
+    "Reference No.": "AML2609082",
+    "業務類型": "海運",
+    "方向": "進口",
+    "狀態": "已開票",
+    "Shipper": "",
+    "Consignee": "",
+    "Notify Party": "",
+    "POL": "TAIPEI",
+    "POD": "HONG KONG",
+    "Final Destination": "",
+    "Flight／Vessel＋Voyage": "WAN HAI 357 / S039",
+    "ETD": "",
+    "ETA": "2026-09-22",
+    "PCS": 8,
+    "Gross Weight": 100.0,
+    "Chargeable Weight／CBM": 0.33,
+    "MAWB／MBL No.": "",
+    "HAWB／HBL No.": "",
+    "Booking／S/O No.": "",
+    "收款狀態": "未收款",
+    "付款狀態": "未付款"
+   },
+   "charges": [
+    {
+     "Charge 名稱": "CHARGES OF SHIPPING COMPANY",
+     "CURR": "HKD",
+     "PRICE": 1540,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 1540,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "HANDLING CHARGE",
+     "CURR": "HKD",
+     "PRICE": 300,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 300,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "IMPORT DECLARATION FEE",
+     "CURR": "HKD",
+     "PRICE": 263,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 263,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "REGISTRATION FEE",
+     "CURR": "HKD",
+     "PRICE": 960,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 960,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "GATE CHARGE",
+     "CURR": "HKD",
+     "PRICE": 150,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 150,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "PARKING FEE",
+     "CURR": "HKD",
+     "PRICE": 330,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 330,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "DELIVERY CHARGE TO CFS WAREHOUSE",
+     "CURR": "HKD",
+     "PRICE": 700,
+     "UNIT": "SHPT",
+     "QTY": 1,
+     "AMOUNT (HKD)": 700,
+     "收費類別": "向客收費"
+    }
+   ],
+   "expected_total_hkd": 4243.0,
+   "invoice": {
+    "Invoice No.": "AML2609082",
+    "Invoice Date": "2026-09-22",
+    "Total": 4243,
+    "貨幣": "HKD",
+    "付款狀態": "未收",
+    "發票類別": "客人發票"
+   },
+   "source": "INVOICE_FOR_IMPORT_OCEAN_SHPT.xlsx (AML2609082, 2026-09-22); Shipper/Consignee/MBL/HBL blank in the file — left blank, not guessed"
+  },
+  {
+   "case": {
+    "Reference No.": "AML2608109",
+    "業務類型": "物流服務",
+    "方向": "",
+    "狀態": "已開票",
+    "Shipper": "",
+    "Consignee": "",
+    "Notify Party": "",
+    "POL": "",
+    "POD": "",
+    "Final Destination": "",
+    "Flight／Vessel＋Voyage": "",
+    "ETD": "",
+    "ETA": "",
+    "PCS": "",
+    "Gross Weight": "",
+    "Chargeable Weight／CBM": "",
+    "MAWB／MBL No.": "",
+    "HAWB／HBL No.": "",
+    "Booking／S/O No.": "",
+    "收款狀態": "未收款",
+    "付款狀態": "未付款"
+   },
+   "charges": [
+    {
+     "Charge 名稱": "Inventory Take for HQ L2, L6, L8",
+     "CURR": "HKD",
+     "PRICE": 1200,
+     "UNIT": "Man",
+     "QTY": 9,
+     "AMOUNT (HKD)": 10800,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "Provide labour to dismantle and remove furniture and delivery charges",
+     "CURR": "HKD",
+     "PRICE": 131100,
+     "UNIT": "Shpt",
+     "QTY": 1,
+     "AMOUNT (HKD)": 131100,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "Site Management",
+     "CURR": "HKD",
+     "PRICE": 4500,
+     "UNIT": "Shpt",
+     "QTY": 1,
+     "AMOUNT (HKD)": 4500,
+     "收費類別": "向客收費"
+    },
+    {
+     "Charge 名稱": "40' Container",
+     "CURR": "HKD",
+     "PRICE": 55000,
+     "UNIT": "Shpt",
+     "QTY": 1,
+     "AMOUNT (HKD)": 55000,
+     "收費類別": "向客收費"
+    }
+   ],
+   "expected_total_hkd": 201400.0,
+   "invoice": {
+    "Invoice No.": "AML2608109",
+    "Invoice Date": "2026-10-07",
+    "Total": 201400,
+    "貨幣": "HKD",
+    "付款狀態": "未收",
+    "發票類別": "客人發票"
+   },
+   "source": "INVOICE_FOR_LOGISTICS_SHPT.xlsx (AML2608109, 2026-10-07); no POL/POD/shipper/consignee in the file — left blank; SOS PO FPO26080087R0 and Job No. MSS26013 have no field in 個案主表, not stored"
+  }
+ ]
+}

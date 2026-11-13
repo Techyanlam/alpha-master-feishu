@@ -396,6 +396,109 @@ def main():
                          ensure_ascii=False))
         return 0 if len(charge_ids) == len(seed["charges"]) and r.get("code") == 0 else 1
 
+    if cmd == "seed-all":
+        # Seed the other 4 sample invoices as cases (AMLS2608022, AML2610063,
+        # AML2609082, AML2608109) from alpha_seed_all.json. Fully idempotent:
+        # cases reused by Reference No., charges by (case + Charge 名稱),
+        # invoices by Invoice No. — a re-run creates nothing new.
+        import os
+        from datetime import datetime, timezone, timedelta
+        spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "alpha_seed_all.json")
+        with open(spec_path, encoding="utf-8") as f:
+            seeds = json.load(f)["cases"]
+        hkt = timezone(timedelta(hours=8))
+
+        def to_ms(v):
+            if isinstance(v, str) and len(v) == 10 and v[4] == "-":
+                return int(datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=hkt).timestamp() * 1000)
+            return v
+
+        def clean(fields):
+            return {k: to_ms(v) for k, v in fields.items()
+                    if not (isinstance(v, str) and v == "")}
+
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid, chg_tid, inv_tid = (by_name.get("個案主表"),
+                                     by_name.get("收費明細"), by_name.get("發票"))
+        cases = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records?page_size=100", token)
+        case_by_ref = {r["fields"].get("Reference No."): r["record_id"]
+                       for r in cases.get("data", {}).get("items", [])}
+        chgs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/records?page_size=100", token)
+        existing_charges = set()
+        for r in chgs.get("data", {}).get("items", []):
+            link = r["fields"].get("個案") or {}
+            ids = link.get("record_ids") or []
+            for cid in ids:
+                existing_charges.add((cid, r["fields"].get("Charge 名稱")))
+        invs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{inv_tid}/records?page_size=100", token)
+        inv_by_no = {r["fields"].get("Invoice No."): r["record_id"]
+                     for r in invs.get("data", {}).get("items", [])}
+        ok = True
+        for seed in seeds:
+            ref = seed["case"]["Reference No."]
+            case_id = case_by_ref.get(ref)
+            if case_id:
+                print(json.dumps({"stage": "seed-all-case-reused", "ref": ref,
+                                  "record_id": case_id}, ensure_ascii=False))
+            else:
+                res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records",
+                           token, payload={"fields": clean(seed["case"])})
+                if res.get("code") != 0:
+                    print(json.dumps({"stage": "seed-all-case", "ref": ref,
+                                      "code": res.get("code"), "msg": res.get("msg")},
+                                     ensure_ascii=False))
+                    ok = False
+                    continue
+                case_id = res["data"]["record"]["record_id"]
+                case_by_ref[ref] = case_id
+                print(json.dumps({"stage": "seed-all-case", "ref": ref,
+                                  "record_id": case_id}, ensure_ascii=False))
+            total, made = 0.0, 0
+            for ch in seed["charges"]:
+                total += float(ch["AMOUNT (HKD)"])
+                if (case_id, ch["Charge 名稱"]) in existing_charges:
+                    print(json.dumps({"stage": "seed-all-charge-reused", "ref": ref,
+                                      "charge": ch["Charge 名稱"]}, ensure_ascii=False))
+                    continue
+                fields = clean(ch)
+                fields["個案"] = [case_id]
+                r = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/records",
+                         token, payload={"fields": fields})
+                if r.get("code") == 0:
+                    made += 1
+                    existing_charges.add((case_id, ch["Charge 名稱"]))
+                else:
+                    print(json.dumps({"stage": "seed-all-charge-failed", "ref": ref,
+                                      "charge": ch["Charge 名稱"], "code": r.get("code"),
+                                      "msg": r.get("msg")}, ensure_ascii=False))
+                    ok = False
+            inv_no = seed["invoice"]["Invoice No."]
+            if inv_no in inv_by_no:
+                print(json.dumps({"stage": "seed-all-invoice-reused", "ref": ref,
+                                  "record_id": inv_by_no[inv_no]}, ensure_ascii=False))
+            else:
+                inv_fields = clean(seed["invoice"])
+                inv_fields["個案"] = [case_id]
+                r = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{inv_tid}/records",
+                         token, payload={"fields": inv_fields})
+                if r.get("code") == 0:
+                    inv_by_no[inv_no] = r["data"]["record"]["record_id"]
+                else:
+                    print(json.dumps({"stage": "seed-all-invoice-failed", "ref": ref,
+                                      "code": r.get("code"), "msg": r.get("msg")},
+                                     ensure_ascii=False))
+                    ok = False
+            print(json.dumps({"stage": "seed-all-done", "ref": ref, "case_id": case_id,
+                              "charges_created": made,
+                              "charge_total_hkd": round(total, 2),
+                              "expected_total_hkd": seed["expected_total_hkd"],
+                              "total_matches": round(total, 2) == seed["expected_total_hkd"]},
+                             ensure_ascii=False))
+        return 0 if ok else 1
+
     if cmd == "test-formula":
         tables = list_tables(token, app_token)
         by_name = {t["name"]: t["table_id"]
