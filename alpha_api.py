@@ -473,6 +473,39 @@ def main():
                           "data": res.get("data")}, ensure_ascii=False))
         return 0 if res.get("code") == 0 else 1
 
+    if cmd == "phase2-formulas":
+        # Formula fields only — Lookup creation via API is proven impossible
+        # (7 shapes failed with 99992402); the two filtered Lookups
+        # (向客收費金額 / 供應商成本金額) must already exist in the UI.
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid = by_name.get("個案主表")
+        existing = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields?page_size=100", token)
+        existing_names = {f["field_name"] for f in existing.get("data", {}).get("items", [])}
+        formulas = [
+            ("向客收費總額", "SUM({向客收費金額})"),
+            ("供應商成本總額", "SUM({供應商成本金額})"),
+            ("利潤", "{向客收費總額}-{供應商成本總額}"),
+        ]
+        ok = True
+        for name, expr in formulas:
+            if name in existing_names:
+                print(json.dumps({"stage": "phase2-formula", "field": name,
+                                  "result": "EXISTS-SKIP"}, ensure_ascii=False))
+                continue
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
+                       token, payload={"field_name": name, "type": 20,
+                                       "property": {"formula_expression": expr}})
+            print(json.dumps({"stage": "phase2-formula", "field": name,
+                              "expression": expr, "code": res.get("code"),
+                              "msg": res.get("msg"),
+                              "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
+                             ensure_ascii=False))
+            if res.get("code") != 0:
+                ok = False
+        return 0 if ok else 1
+
     if cmd == "create-field":
         table_id = sys.argv[3]
         spec = json.loads(sys.argv[4])
