@@ -402,45 +402,69 @@ def main():
                    for t in tables.get("data", {}).get("items", [])}
         case_tid, chg_tid = by_name.get("個案主表"), by_name.get("收費明細")
         cf = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields?page_size=100", token)
-        link = next((f for f in cf.get("data", {}).get("items", [])
-                     if f.get("field_name") == "收費明細"), None)
+        cfields = {f["field_name"]: f for f in cf.get("data", {}).get("items", [])}
+        ref_fid = cfields["Reference No."]["field_id"]
+        link_fid = cfields["收費明細"]["field_id"]
         fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/fields?page_size=100", token)
-        amt = next((f for f in fres.get("data", {}).get("items", [])
-                    if f.get("field_name") == "AMOUNT (HKD)"), None)
+        hfields = {f["field_name"]: f for f in fres.get("data", {}).get("items", [])}
+        amt_fid = hfields["AMOUNT (HKD)"]["field_id"]
+        cat_fid = hfields["收費類別"]["field_id"]
+        # NOTE: the link field in the FORMULA/condition is the 個案 field in
+        # the TARGET table (收費明細), NOT the back-link in 個案主表.
+        target_link_fid = hfields["個案"]["field_id"]
+        cat_opts = hfields["收費類別"].get("property", {}).get("options", [])
         print(json.dumps({"stage": "test-formula", "case_table": case_tid,
-                          "charge_table": chg_tid, "link_field": link.get("field_id") if link else None,
-                          "amount_field": amt.get("field_id") if amt else None},
+                          "charge_table": chg_tid, "ref_field": ref_fid,
+                          "target_link_field": target_link_fid, "amount_field": amt_fid,
+                          "category_field": cat_fid, "category_options": cat_opts},
                          ensure_ascii=False))
-        if not amt or not link:
-            return 1
-        # Candidate Lookup property shapes, tried in order; stop at the
-        # first success. Shape 1 (table_id + field_id) already failed with
-        # 99992402 in run #8, so it is not retried.
-        candidates = [
-            ("link+lookup_field", {"field_id": link["field_id"],
-                                   "lookup_field_id": amt["field_id"]}),
-            ("table+field+lookup_field", {"table_id": chg_tid,
-                                          "field_id": amt["field_id"],
-                                          "lookup_field_id": link["field_id"]}),
-            ("table+link+lookup_field", {"table_id": chg_tid,
-                                         "field_id": link["field_id"],
-                                         "lookup_field_id": amt["field_id"]}),
-            ("lookup_field+field", {"lookup_field_id": link["field_id"],
-                                    "field_id": amt["field_id"]}),
-        ]
-        lookup_ok = False
-        for label, prop in candidates:
+        # Exact property of the UI-created Lookup, rebuilt from live ids.
+        def lookup_prop(extra_child=None, extra_formula=""):
+            formula = (f"bitable::$table[{chg_tid}].FILTER(CurrentValue.$column[{target_link_fid}]"
+                       f"=bitable::$table[{case_tid}].$field[{ref_fid}]{extra_formula})"
+                       f".$column[{amt_fid}].LISTCOMBINE()")
+            children = [{"field_id": target_link_fid, "field_type": 21,
+                         "operator": "is", "value": None}]
+            if extra_child:
+                children.append(extra_child)
+            return {"filter_info": {"conditions": {"children": children,
+                                                   "conjunction": "and"},
+                                    "target_table": chg_tid},
+                    "formatter": "", "formula": formula, "roll_up": 0,
+                    "target_field": amt_fid}
+        # Attempt 1: full read-back property (with formula).
+        res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
+                   token, payload={"field_name": "測試-API-LOOKUP", "type": 19,
+                                   "property": lookup_prop()})
+        print(json.dumps({"stage": "test-formula-lookup", "shape": "full-property-with-formula",
+                          "code": res.get("code"), "msg": res.get("msg"),
+                          "data": res.get("data")}, ensure_ascii=False))
+        lookup_ok = res.get("code") == 0
+        # Attempt 2 (only if 1 failed): same property minus the formula key.
+        if not lookup_ok:
+            prop2 = lookup_prop()
+            del prop2["formula"]
             res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
-                       token, payload={"field_name": "測試-收費金額", "type": 19,
-                                       "property": prop})
-            print(json.dumps({"stage": "test-formula-lookup", "shape": label,
+                       token, payload={"field_name": "測試-API-LOOKUP-2", "type": 19,
+                                       "property": prop2})
+            print(json.dumps({"stage": "test-formula-lookup", "shape": "no-formula-key",
                               "code": res.get("code"), "msg": res.get("msg"),
                               "data": res.get("data")}, ensure_ascii=False))
-            if res.get("code") == 0:
-                lookup_ok = True
-                break
-        if not lookup_ok:
-            return 1
+            lookup_ok = res.get("code") == 0
+        # Attempt 3 (only if API lookup creation works): filtered lookup for
+        # 向客收費 only — extra condition on 收費類別.
+        if lookup_ok:
+            extra = {"field_id": cat_fid, "field_type": 3,
+                     "operator": "is", "value": "向客收費"}
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
+                       token, payload={"field_name": "測試-向客收費", "type": 19,
+                                       "property": lookup_prop(
+                                           extra_child=extra,
+                                           extra_formula=f' && CurrentValue.$column[{cat_fid}]="向客收費"')})
+            print(json.dumps({"stage": "test-formula-lookup", "shape": "filtered-category",
+                              "code": res.get("code"), "msg": res.get("msg"),
+                              "data": res.get("data")}, ensure_ascii=False))
+        # Formula attempt (independent: sums the UI-created test lookup).
         res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
                    token, payload={"field_name": "測試-收費總額", "type": 20,
                                    "property": {"formula_expression": "SUM({測試-收費金額})"}})
