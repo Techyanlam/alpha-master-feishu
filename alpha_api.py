@@ -20,6 +20,12 @@ Commands:
   verify                       List every table in the Base with all of its
                                fields (name, type, ui_type) — one run to check
                                a build end to end.
+  fix-supplier                 One-off fix: in the 供應商 table, delete the
+                               stray default primary field named 多行文本 left
+                               over from the build (the back-link 相關個案 was
+                               created before its own fields, so the reuse
+                               check missed it). If delete is rejected (primary
+                               field protection), rename it to 備註 instead.
   list-records <table_id>      List first page of records (values only)
 
 Credentials: JSON on stdin only, never printed or stored:
@@ -231,6 +237,33 @@ def main():
                               "field_count": len(fields), "fields": fields},
                              ensure_ascii=False))
         return 0
+
+    if cmd == "fix-supplier":
+        tid = "tblm6XB7fjbDaB7X"
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "fix-supplier", "code": res.get("code"),
+                              "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        target = next((f for f in res.get("data", {}).get("items", [])
+                       if f.get("field_name") == "多行文本"), None)
+        if not target:
+            print(json.dumps({"stage": "fix-supplier", "result": "no stray field found"},
+                             ensure_ascii=False))
+            return 0
+        fid = target["field_id"]
+        res = call("DELETE", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields/{fid}", token)
+        print(json.dumps({"stage": "fix-supplier-delete", "field_id": fid,
+                          "code": res.get("code"), "msg": res.get("msg")},
+                         ensure_ascii=False))
+        if res.get("code") == 0:
+            return 0
+        res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields/{fid}",
+                   token, payload={"field_name": "備註", "type": 1})
+        print(json.dumps({"stage": "fix-supplier-rename-fallback", "field_id": fid,
+                          "code": res.get("code"), "msg": res.get("msg")},
+                         ensure_ascii=False))
+        return 0 if res.get("code") == 0 else 1
 
     if cmd == "create-field":
         table_id = sys.argv[3]
