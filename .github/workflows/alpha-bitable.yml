@@ -1,0 +1,50 @@
+# ALPHA MASTER — Feishu Bitable API (manual run)
+# Secrets required in this repo (Settings → Secrets and variables → Actions):
+#   ALPHA_APP_ID      — Feishu App ID, e.g. cli_aa7c0d0eb3f89bf0
+#   ALPHA_APP_SECRET  — the same App's App Secret (never paste it in chat)
+# Base app_token: Ryz0b5N51a54SpslooOcTmHHn0f
+# NOTE: this file cannot be pushed by the GitHub App — add it via the GitHub web editor.
+name: Alpha Bitable API
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "API command: list-tables | list-fields <table_id> | list-records <table_id>"
+        required: true
+        default: "list-tables"
+      arg:
+        description: "table_id for list-fields / list-records (leave blank for list-tables)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run Feishu Bitable API
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          creds = {"app_id": os.environ["ALPHA_APP_ID"],
+                   "app_secret": os.environ["ALPHA_APP_SECRET"]}
+          cmd = ["python3", "alpha_api.py", "Ryz0b5N51a54SpslooOcTmHHn0f",
+                 os.environ["CMD"]] + ([os.environ["ARG"]] if os.environ["ARG"] else [])
+          p = subprocess.run(cmd, input=json.dumps(creds), text=True,
+                             capture_output=True)
+          print(p.stdout)
+          print(p.stderr, file=sys.stderr)
+          sys.exit(p.returncode)
+          PY
+        env:
+          ALPHA_APP_ID: ${{ secrets.ALPHA_APP_ID }}
+          ALPHA_APP_SECRET: ${{ secrets.ALPHA_APP_SECRET }}
+          CMD: ${{ inputs.command }}
+          ARG: ${{ inputs.arg }}
