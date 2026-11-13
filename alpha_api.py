@@ -26,6 +26,11 @@ Commands:
                                created before its own fields, so the reuse
                                check missed it). If delete is rejected (primary
                                field protection), rename it to 備註 instead.
+  seed                         Create one test case from alpha_seed.json
+                               (AMLA2606040 + its 11 charge lines + invoice),
+                               resolving table ids by name and trying both link
+                               value formats. Prints record ids and the charge
+                               total vs the expected invoice total.
   list-records <table_id>      List first page of records (values only)
 
 Credentials: JSON on stdin only, never printed or stored:
@@ -264,6 +269,81 @@ def main():
                           "code": res.get("code"), "msg": res.get("msg")},
                          ensure_ascii=False))
         return 0 if res.get("code") == 0 else 1
+
+    if cmd == "seed":
+        import os
+        from datetime import datetime, timezone, timedelta
+        spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "alpha_seed.json")
+        with open(spec_path, encoding="utf-8") as f:
+            seed = json.load(f)
+        hkt = timezone(timedelta(hours=8))
+
+        def to_ms(v):
+            if isinstance(v, str) and len(v) == 10 and v[4] == "-":
+                return int(datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=hkt).timestamp() * 1000)
+            return v
+
+        def clean(fields):
+            return {k: to_ms(v) for k, v in fields.items()
+                    if not (isinstance(v, str) and v == "")}
+
+        tables = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables", token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid, chg_tid, inv_tid = (by_name.get("個案主表"),
+                                     by_name.get("收費明細"), by_name.get("發票"))
+        print(json.dumps({"stage": "seed-tables", "tables": by_name},
+                         ensure_ascii=False))
+        res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records",
+                   token, payload={"fields": clean(seed["case"])})
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "seed-case", "code": res.get("code"),
+                              "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        case_id = res["data"]["record"]["record_id"]
+        print(json.dumps({"stage": "seed-case", "record_id": case_id},
+                         ensure_ascii=False))
+        link_fmt = None
+        charge_ids, total = [], 0.0
+        for ch in seed["charges"]:
+            fields = clean(ch)
+            total += float(ch["AMOUNT (HKD)"])
+            for fmt in (link_fmt,) if link_fmt else ({"record_ids": [case_id]},
+                                                     {"id": case_id}):
+                fields["個案"] = fmt
+                r = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/records",
+                         token, payload={"fields": fields})
+                if r.get("code") == 0:
+                    link_fmt = fmt
+                    charge_ids.append(r["data"]["record"]["record_id"])
+                    print(json.dumps({"stage": "seed-charge", "charge": ch["Charge 名稱"],
+                                      "record_id": charge_ids[-1],
+                                      "link_format": ("record_ids" if "record_ids" in fmt else "id")},
+                                     ensure_ascii=False))
+                    break
+                print(json.dumps({"stage": "seed-charge-failed", "charge": ch["Charge 名稱"],
+                                  "tried": ("record_ids" if "record_ids" in fmt else "id"),
+                                  "code": r.get("code"), "msg": r.get("msg")},
+                                 ensure_ascii=False))
+            else:
+                print(json.dumps({"stage": "seed-charge", "charge": ch["Charge 名稱"],
+                                  "result": "LINK_FAILED"}, ensure_ascii=False))
+        inv_fields = clean(seed["invoice"])
+        inv_fields["個案"] = link_fmt or {"record_ids": [case_id]}
+        r = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{inv_tid}/records",
+                 token, payload={"fields": inv_fields})
+        print(json.dumps({"stage": "seed-invoice",
+                          "code": r.get("code"), "msg": r.get("msg"),
+                          "record_id": r.get("data", {}).get("record", {}).get("record_id")},
+                         ensure_ascii=False))
+        print(json.dumps({"stage": "seed-done", "case_id": case_id,
+                          "charge_count": len(charge_ids),
+                          "charge_total_hkd": round(total, 2),
+                          "expected_total_hkd": seed["expected_total_hkd"],
+                          "total_matches": round(total, 2) == seed["expected_total_hkd"]},
+                         ensure_ascii=False))
+        return 0 if len(charge_ids) == len(seed["charges"]) and r.get("code") == 0 else 1
 
     if cmd == "create-field":
         table_id = sys.argv[3]
