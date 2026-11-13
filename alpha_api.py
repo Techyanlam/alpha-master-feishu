@@ -17,6 +17,9 @@ Commands:
                                formulas/lookups are phase 2). Creates the
                                tables first, then fields; reuses the default
                                primary text field as each table's first field.
+  verify                       List every table in the Base with all of its
+                               fields (name, type, ui_type) — one run to check
+                               a build end to end.
   list-records <table_id>      List first page of records (values only)
 
 Credentials: JSON on stdin only, never printed or stored:
@@ -197,6 +200,37 @@ def main():
         print(json.dumps({"stage": "build-done", "tables": table_ids,
                           "failures": failures}, ensure_ascii=False))
         return 1 if failures else 0
+
+    if cmd == "verify":
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables", token)
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "verify", "code": res.get("code"),
+                              "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        for t in res.get("data", {}).get("items", []):
+            tid, fields, page_token = t["table_id"], [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields"
+                       f"?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                fres = call("GET", url, token)
+                if fres.get("code") != 0:
+                    print(json.dumps({"stage": "verify-fields", "table": t["name"],
+                                      "code": fres.get("code"), "msg": fres.get("msg")},
+                                     ensure_ascii=False))
+                    break
+                data = fres.get("data", {})
+                fields.extend({"field_name": f["field_name"], "type": f["type"],
+                               "ui_type": f.get("ui_type")}
+                              for f in data.get("items", []))
+                if not data.get("has_more"):
+                    break
+                page_token = data.get("page_token")
+            print(json.dumps({"table": t["name"], "table_id": tid,
+                              "field_count": len(fields), "fields": fields},
+                             ensure_ascii=False))
+        return 0
 
     if cmd == "create-field":
         table_id = sys.argv[3]
