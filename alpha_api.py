@@ -401,23 +401,45 @@ def main():
         by_name = {t["name"]: t["table_id"]
                    for t in tables.get("data", {}).get("items", [])}
         case_tid, chg_tid = by_name.get("個案主表"), by_name.get("收費明細")
+        cf = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields?page_size=100", token)
+        link = next((f for f in cf.get("data", {}).get("items", [])
+                     if f.get("field_name") == "收費明細"), None)
         fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/fields?page_size=100", token)
         amt = next((f for f in fres.get("data", {}).get("items", [])
                     if f.get("field_name") == "AMOUNT (HKD)"), None)
         print(json.dumps({"stage": "test-formula", "case_table": case_tid,
-                          "charge_table": chg_tid,
+                          "charge_table": chg_tid, "link_field": link.get("field_id") if link else None,
                           "amount_field": amt.get("field_id") if amt else None},
                          ensure_ascii=False))
-        if not amt:
+        if not amt or not link:
             return 1
-        res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
-                   token, payload={"field_name": "測試-收費金額", "type": 19,
-                                   "property": {"table_id": chg_tid,
-                                                "field_id": amt["field_id"]}})
-        print(json.dumps({"stage": "test-formula-lookup",
-                          "code": res.get("code"), "msg": res.get("msg"),
-                          "data": res.get("data")}, ensure_ascii=False))
-        if res.get("code") != 0:
+        # Candidate Lookup property shapes, tried in order; stop at the
+        # first success. Shape 1 (table_id + field_id) already failed with
+        # 99992402 in run #8, so it is not retried.
+        candidates = [
+            ("link+lookup_field", {"field_id": link["field_id"],
+                                   "lookup_field_id": amt["field_id"]}),
+            ("table+field+lookup_field", {"table_id": chg_tid,
+                                          "field_id": amt["field_id"],
+                                          "lookup_field_id": link["field_id"]}),
+            ("table+link+lookup_field", {"table_id": chg_tid,
+                                         "field_id": link["field_id"],
+                                         "lookup_field_id": amt["field_id"]}),
+            ("lookup_field+field", {"lookup_field_id": link["field_id"],
+                                    "field_id": amt["field_id"]}),
+        ]
+        lookup_ok = False
+        for label, prop in candidates:
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
+                       token, payload={"field_name": "測試-收費金額", "type": 19,
+                                       "property": prop})
+            print(json.dumps({"stage": "test-formula-lookup", "shape": label,
+                              "code": res.get("code"), "msg": res.get("msg"),
+                              "data": res.get("data")}, ensure_ascii=False))
+            if res.get("code") == 0:
+                lookup_ok = True
+                break
+        if not lookup_ok:
             return 1
         res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
                    token, payload={"field_name": "測試-收費總額", "type": 20,
