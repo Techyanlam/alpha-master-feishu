@@ -473,37 +473,91 @@ def main():
                           "data": res.get("data")}, ensure_ascii=False))
         return 0 if res.get("code") == 0 else 1
 
-    if cmd == "phase2-formulas":
-        # Formula fields only — Lookup creation via API is proven impossible
-        # (7 shapes failed with 99992402); the two filtered Lookups
-        # (向客收費金額 / 供應商成本金額) must already exist in the UI.
+    if cmd == "fix-test-formula":
+        # Repair the API-created Formula field 測試-收費總額 (broken in the
+        # UI: "data source does not exist") by rewriting its property in
+        # the exact shape the UI stores: structured field reference plus
+        # the result-type object. Then read the case row back to prove it
+        # computes.
         tables = list_tables(token, app_token)
         by_name = {t["name"]: t["table_id"]
                    for t in tables.get("data", {}).get("items", [])}
         case_tid = by_name.get("個案主表")
-        existing = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields?page_size=100", token)
-        existing_names = {f["field_name"] for f in existing.get("data", {}).get("items", [])}
-        formulas = [
-            ("向客收費總額", "SUM({向客收費金額})"),
-            ("供應商成本總額", "SUM({供應商成本金額})"),
-            ("利潤", "{向客收費總額}-{供應商成本總額}"),
-        ]
-        ok = True
-        for name, expr in formulas:
-            if name in existing_names:
+        fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields?page_size=100", token)
+        fmap = {f["field_name"]: f for f in fres.get("data", {}).get("items", [])}
+        formula_fid = fmap["測試-收費總額"]["field_id"]
+        lookup_fid = fmap["測試-收費金額"]["field_id"]
+        prop = {"formatter": "",
+                "formula_expression": f"SUM(bitable::$table[{case_tid}].$field[{lookup_fid}])",
+                "type": {"data_type": 2, "ui_property": {"formatter": "0"},
+                         "ui_type": "Number"}}
+        res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields/{formula_fid}",
+                   token, payload={"field_name": "測試-收費總額", "type": 20,
+                                   "property": prop})
+        print(json.dumps({"stage": "fix-test-formula", "code": res.get("code"),
+                          "msg": res.get("msg"),
+                          "field": (res.get("data", {}) or {}).get("field")},
+                         ensure_ascii=False))
+        if res.get("code") != 0:
+            return 1
+        recs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records?page_size=20", token)
+        for rec in recs.get("data", {}).get("items", []):
+            if rec.get("fields", {}).get("Reference No.") == "AMLA2606040":
+                print(json.dumps({"stage": "fix-test-formula-value",
+                                  "record_id": rec["record_id"],
+                                  "fields": rec["fields"]},
+                                 ensure_ascii=False))
+                break
+        return 0
+
+    if cmd == "phase2-formulas":
+        # Formula fields only — Lookup creation via API is proven impossible
+        # (7 shapes failed with 99992402); the two filtered Lookups
+        # (向客收費金額 / 供應商成本金額) must already exist in the UI.
+        # Formula property MUST use the structured reference shape the UI
+        # stores (bitable::$table[..].$field[..] + type object); the bare
+        # {Name} form creates a field that errors in the UI.
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid = by_name.get("個案主表")
+
+        def field_map():
+            fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields?page_size=100", token)
+            return {f["field_name"]: f for f in fres.get("data", {}).get("items", [])}
+
+        def make_formula(name, expr):
+            fmap = field_map()
+            if name in fmap:
                 print(json.dumps({"stage": "phase2-formula", "field": name,
                                   "result": "EXISTS-SKIP"}, ensure_ascii=False))
-                continue
+                return True
+            prop = {"formatter": "", "formula_expression": expr,
+                    "type": {"data_type": 2, "ui_property": {"formatter": "0"},
+                             "ui_type": "Number"}}
             res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
                        token, payload={"field_name": name, "type": 20,
-                                       "property": {"formula_expression": expr}})
+                                       "property": prop})
             print(json.dumps({"stage": "phase2-formula", "field": name,
                               "expression": expr, "code": res.get("code"),
                               "msg": res.get("msg"),
                               "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
                              ensure_ascii=False))
-            if res.get("code") != 0:
-                ok = False
+            return res.get("code") == 0
+
+        fmap = field_map()
+        rev_fid = fmap["向客收費金額"]["field_id"]
+        cost_fid = fmap["供應商成本金額"]["field_id"]
+        ok = make_formula("向客收費總額",
+                          f"SUM(bitable::$table[{case_tid}].$field[{rev_fid}])")
+        ok = make_formula("供應商成本總額",
+                          f"SUM(bitable::$table[{case_tid}].$field[{cost_fid}])") and ok
+        fmap = field_map()
+        rev_total_fid = fmap["向客收費總額"]["field_id"]
+        cost_total_fid = fmap["供應商成本總額"]["field_id"]
+        ok = make_formula("利潤",
+                          f"bitable::$table[{case_tid}].$field[{rev_total_fid}]"
+                          f"-bitable::$table[{case_tid}].$field[{cost_total_fid}]") and ok
         return 0 if ok else 1
 
     if cmd == "create-field":
