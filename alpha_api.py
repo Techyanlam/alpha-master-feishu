@@ -31,6 +31,14 @@ Commands:
                                resolving table ids by name and trying both link
                                value formats. Prints record ids and the charge
                                total vs the expected invoice total.
+  test-formula                 Empirical test for Phase 2: create one Lookup
+                               field (測試-收費金額, pulling 收費明細 AMOUNT)
+                               and one Formula field (測試-收費總額 =
+                               SUM of the lookup) in 個案主表, using the
+                               best-guess property shapes. Prints raw API
+                               results so the correct shapes can be fixed from
+                               the error messages if they fail. Test fields
+                               are clearly named and safe to delete in the UI.
   list-records <table_id>      List first page of records (values only)
 
 Credentials: JSON on stdin only, never printed or stored:
@@ -344,6 +352,37 @@ def main():
                           "total_matches": round(total, 2) == seed["expected_total_hkd"]},
                          ensure_ascii=False))
         return 0 if len(charge_ids) == len(seed["charges"]) and r.get("code") == 0 else 1
+
+    if cmd == "test-formula":
+        tables = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables", token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid, chg_tid = by_name.get("個案主表"), by_name.get("收費明細")
+        fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/fields?page_size=100", token)
+        amt = next((f for f in fres.get("data", {}).get("items", [])
+                    if f.get("field_name") == "AMOUNT (HKD)"), None)
+        print(json.dumps({"stage": "test-formula", "case_table": case_tid,
+                          "charge_table": chg_tid,
+                          "amount_field": amt.get("field_id") if amt else None},
+                         ensure_ascii=False))
+        if not amt:
+            return 1
+        res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
+                   token, payload={"field_name": "測試-收費金額", "type": 19,
+                                   "property": {"table_id": chg_tid,
+                                                "field_id": amt["field_id"]}})
+        print(json.dumps({"stage": "test-formula-lookup",
+                          "code": res.get("code"), "msg": res.get("msg"),
+                          "data": res.get("data")}, ensure_ascii=False))
+        if res.get("code") != 0:
+            return 1
+        res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
+                   token, payload={"field_name": "測試-收費總額", "type": 20,
+                                   "property": {"formula_expression": "SUM({測試-收費金額})"}})
+        print(json.dumps({"stage": "test-formula-formula",
+                          "code": res.get("code"), "msg": res.get("msg"),
+                          "data": res.get("data")}, ensure_ascii=False))
+        return 0 if res.get("code") == 0 else 1
 
     if cmd == "create-field":
         table_id = sys.argv[3]
