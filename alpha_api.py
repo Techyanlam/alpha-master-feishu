@@ -6,6 +6,12 @@ Commands:
   list-tables                  List all tables in the Base
   list-fields <table_id>       List fields of one table (paged, 20 at a time)
   create-table <table_name>    Create a new table (fields added afterwards)
+  create-field <table_id> <field-spec-json>
+                               Create one field; spec is the raw API field
+                               object, e.g. {"field_name":"狀態","type":3,
+                               "property":{"options":[{"name":"已下單","color":0}]}}. Test one field at a time.
+  create-record <table_id> <record-fields-json>
+                               Create one record; e.g. {"Reference No.":"AMLA2610065"}
   list-records <table_id>      List first page of records (values only)
 
 Credentials: JSON on stdin only, never printed or stored:
@@ -109,6 +115,32 @@ def main():
                    payload={"table": {"name": name}})
         if res.get("code") != 0:
             print(json.dumps({"stage": "create-table", "code": res.get("code"),
+                              "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        print(json.dumps(res.get("data", {}), ensure_ascii=False, indent=2))
+        return 0
+
+    if cmd == "create-field":
+        table_id = sys.argv[3]
+        spec = json.loads(sys.argv[4])
+        res = call("POST",
+                   f"{BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/fields",
+                   token, payload=spec)
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "create-field", "code": res.get("code"),
+                              "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        print(json.dumps(res.get("data", {}), ensure_ascii=False, indent=2))
+        return 0
+
+    if cmd == "create-record":
+        table_id = sys.argv[3]
+        fields = json.loads(sys.argv[4])
+        res = call("POST",
+                   f"{BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records",
+                   token, payload={"fields": fields})
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "create-record", "code": res.get("code"),
                               "msg": res.get("msg")}, ensure_ascii=False))
             return 1
         print(json.dumps(res.get("data", {}), ensure_ascii=False, indent=2))
