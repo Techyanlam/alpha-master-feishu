@@ -94,6 +94,25 @@ def get_token(creds):
     return res["tenant_access_token"]
 
 
+def list_tables(token, app_token):
+    # Paginated: a single GET returns only the first page, which is why the
+    # seed run saw only 4 of the 8 tables.
+    items, page_token = [], None
+    while True:
+        url = f"{BASE}/bitable/v1/apps/{app_token}/tables?page_size=100"
+        if page_token:
+            url += f"&page_token={page_token}"
+        res = call("GET", url, token)
+        if res.get("code") != 0:
+            return res
+        data = res.get("data", {})
+        items.extend(data.get("items", []))
+        if not data.get("has_more"):
+            break
+        page_token = data.get("page_token")
+    return {"code": 0, "data": {"items": items}}
+
+
 def main():
     if len(sys.argv) < 3:
         print("usage: alpha_api.py <app_token> <list-tables|list-fields|create-table|list-records> [arg]")
@@ -105,7 +124,7 @@ def main():
         return 1
 
     if cmd == "list-tables":
-        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables", token)
+        res = list_tables(token, app_token)
         if res.get("code") != 0:
             print(json.dumps({"stage": "list-tables", "code": res.get("code"),
                               "msg": res.get("msg")}, ensure_ascii=False))
@@ -154,8 +173,21 @@ def main():
         with open(spec_path, encoding="utf-8") as f:
             spec = json.load(f)
         table_ids, failures = {}, []
-        # Phase A: create all tables first (links need target ids).
+        # Idempotent: reuse tables/fields that already exist by name, so a
+        # re-run never creates duplicates after a partial build or a manual
+        # delete/recreate in the UI.
+        existing_tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in existing_tables.get("data", {}).get("items", [])}
+        print(json.dumps({"stage": "build-existing-tables", "tables": by_name},
+                         ensure_ascii=False))
+        # Phase A: create missing tables first (links need target ids).
         for t in spec["tables"]:
+            if t["name"] in by_name:
+                table_ids[t["name"]] = by_name[t["name"]]
+                print(json.dumps({"stage": "table-exists", "table": t["name"],
+                                  "table_id": by_name[t["name"]]}, ensure_ascii=False))
+                continue
             res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables",
                        token, payload={"table": {"name": t["name"]}})
             if res.get("code") != 0:
@@ -174,11 +206,13 @@ def main():
             if not tid:
                 continue
             fields = list(t.get("fields", []))
-            # Reuse the default primary text field as the first spec field.
-            existing = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=20", token)
-            done_first = False
+            is_new = t["name"] not in by_name
+            existing = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
             items = existing.get("data", {}).get("items", []) if existing.get("code") == 0 else []
-            if len(items) == 1 and items[0].get("type") == 1 and fields and fields[0].get("type") == 1:
+            existing_names = {f["field_name"] for f in items}
+            # New table only: reuse the default primary text field as the
+            # first spec field.
+            if is_new and len(items) == 1 and items[0].get("type") == 1 and fields and fields[0].get("type") == 1:
                 fid = items[0]["field_id"]
                 res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields/{fid}",
                            token, payload={"field_name": fields[0]["field_name"], "type": 1})
@@ -188,9 +222,13 @@ def main():
                                  ensure_ascii=False))
                 # Skip the first spec field either way: the default field
                 # serves as the primary field (renamed when possible).
-                done_first = True
                 fields = fields[1:]
+                existing_names.add(t["fields"][0]["field_name"])
             for spec_f in fields:
+                if spec_f["field_name"] in existing_names:
+                    print(json.dumps({"stage": "field-exists-skip", "table": t["name"],
+                                      "field": spec_f["field_name"]}, ensure_ascii=False))
+                    continue
                 payload = {"field_name": spec_f["field_name"], "type": spec_f["type"]}
                 if spec_f["type"] in (7, 17):
                     pass  # checkbox/attachment: omit property entirely
@@ -221,7 +259,7 @@ def main():
         return 1 if failures else 0
 
     if cmd == "verify":
-        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables", token)
+        res = list_tables(token, app_token)
         if res.get("code") != 0:
             print(json.dumps({"stage": "verify", "code": res.get("code"),
                               "msg": res.get("msg")}, ensure_ascii=False))
@@ -296,49 +334,54 @@ def main():
             return {k: to_ms(v) for k, v in fields.items()
                     if not (isinstance(v, str) and v == "")}
 
-        tables = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables", token)
+        tables = list_tables(token, app_token)
         by_name = {t["name"]: t["table_id"]
                    for t in tables.get("data", {}).get("items", [])}
         case_tid, chg_tid, inv_tid = (by_name.get("個案主表"),
                                      by_name.get("收費明細"), by_name.get("發票"))
         print(json.dumps({"stage": "seed-tables", "tables": by_name},
                          ensure_ascii=False))
-        res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records",
-                   token, payload={"fields": clean(seed["case"])})
-        if res.get("code") != 0:
-            print(json.dumps({"stage": "seed-case", "code": res.get("code"),
-                              "msg": res.get("msg")}, ensure_ascii=False))
-            return 1
-        case_id = res["data"]["record"]["record_id"]
-        print(json.dumps({"stage": "seed-case", "record_id": case_id},
-                         ensure_ascii=False))
-        link_fmt = None
+        # Reuse the case if a previous seed run already created it, so a
+        # re-run never duplicates the case.
+        ref = seed["case"]["Reference No."]
+        case_id = None
+        existing_recs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records?page_size=20", token)
+        for rec in existing_recs.get("data", {}).get("items", []):
+            if rec.get("fields", {}).get("Reference No.") == ref:
+                case_id = rec["record_id"]
+                break
+        if case_id:
+            print(json.dumps({"stage": "seed-case-reused", "record_id": case_id},
+                             ensure_ascii=False))
+        else:
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records",
+                       token, payload={"fields": clean(seed["case"])})
+            if res.get("code") != 0:
+                print(json.dumps({"stage": "seed-case", "code": res.get("code"),
+                                  "msg": res.get("msg")}, ensure_ascii=False))
+                return 1
+            case_id = res["data"]["record"]["record_id"]
+            print(json.dumps({"stage": "seed-case", "record_id": case_id},
+                             ensure_ascii=False))
+        # Duplex Link field values are a bare array of record-id strings
+        # (error 1254074 proved {"record_ids": [...]} and {"id": ...} wrong).
         charge_ids, total = [], 0.0
         for ch in seed["charges"]:
             fields = clean(ch)
             total += float(ch["AMOUNT (HKD)"])
-            for fmt in (link_fmt,) if link_fmt else ({"record_ids": [case_id]},
-                                                     {"id": case_id}):
-                fields["個案"] = fmt
-                r = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/records",
-                         token, payload={"fields": fields})
-                if r.get("code") == 0:
-                    link_fmt = fmt
-                    charge_ids.append(r["data"]["record"]["record_id"])
-                    print(json.dumps({"stage": "seed-charge", "charge": ch["Charge 名稱"],
-                                      "record_id": charge_ids[-1],
-                                      "link_format": ("record_ids" if "record_ids" in fmt else "id")},
-                                     ensure_ascii=False))
-                    break
+            fields["個案"] = [case_id]
+            r = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/records",
+                     token, payload={"fields": fields})
+            if r.get("code") == 0:
+                charge_ids.append(r["data"]["record"]["record_id"])
+                print(json.dumps({"stage": "seed-charge", "charge": ch["Charge 名稱"],
+                                  "record_id": charge_ids[-1]}, ensure_ascii=False))
+            else:
                 print(json.dumps({"stage": "seed-charge-failed", "charge": ch["Charge 名稱"],
-                                  "tried": ("record_ids" if "record_ids" in fmt else "id"),
                                   "code": r.get("code"), "msg": r.get("msg")},
                                  ensure_ascii=False))
-            else:
-                print(json.dumps({"stage": "seed-charge", "charge": ch["Charge 名稱"],
-                                  "result": "LINK_FAILED"}, ensure_ascii=False))
         inv_fields = clean(seed["invoice"])
-        inv_fields["個案"] = link_fmt or {"record_ids": [case_id]}
+        inv_fields["個案"] = [case_id]
         r = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{inv_tid}/records",
                  token, payload={"fields": inv_fields})
         print(json.dumps({"stage": "seed-invoice",
@@ -354,7 +397,7 @@ def main():
         return 0 if len(charge_ids) == len(seed["charges"]) and r.get("code") == 0 else 1
 
     if cmd == "test-formula":
-        tables = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables", token)
+        tables = list_tables(token, app_token)
         by_name = {t["name"]: t["table_id"]
                    for t in tables.get("data", {}).get("items", [])}
         case_tid, chg_tid = by_name.get("個案主表"), by_name.get("收費明細")
