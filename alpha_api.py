@@ -473,6 +473,68 @@ def main():
                           "data": res.get("data")}, ensure_ascii=False))
         return 0 if res.get("code") == 0 else 1
 
+    if cmd == "test-leak":
+        # Prove the leak alert fires: a test case with a vendor invoice but
+        # NO customer invoice. Idempotent by Reference/Invoice No.
+        import datetime
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid, inv_tid = by_name.get("個案主表"), by_name.get("發票")
+        today_ms = int(datetime.datetime(2026, 11, 13, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+        case_id = None
+        recs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records?page_size=20", token)
+        for rec in recs.get("data", {}).get("items", []):
+            if rec.get("fields", {}).get("Reference No.") == "TEST-LEAK-001":
+                case_id = rec["record_id"]
+                break
+        if case_id:
+            print(json.dumps({"stage": "test-leak-case-reused", "record_id": case_id},
+                             ensure_ascii=False))
+        else:
+            fields = {"Reference No.": "TEST-LEAK-001", "業務類型": "空運",
+                      "方向": "出口", "狀態": "已開票", "Shipper": "TEST",
+                      "Consignee": "TEST", "POL": "HKG", "POD": "SIN",
+                      "Flight／Vessel＋Voyage": "TEST123", "ETD": today_ms,
+                      "PCS": 1, "Gross Weight": 10,
+                      "Chargeable Weight／CBM": 10, "MAWB／MBL No.": "TEST",
+                      "HAWB／HBL No.": "TEST-LEAK-001",
+                      "收款狀態": "未收款", "付款狀態": "未付款"}
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records",
+                       token, payload={"fields": fields})
+            if res.get("code") != 0:
+                print(json.dumps({"stage": "test-leak-case", "code": res.get("code"),
+                                  "msg": res.get("msg")}, ensure_ascii=False))
+                return 1
+            case_id = res["data"]["record"]["record_id"]
+            print(json.dumps({"stage": "test-leak-case", "record_id": case_id},
+                             ensure_ascii=False))
+        inv_id = None
+        invs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{inv_tid}/records?page_size=20", token)
+        for rec in invs.get("data", {}).get("items", []):
+            if rec.get("fields", {}).get("Invoice No.") == "TEST-VENDOR-001":
+                inv_id = rec["record_id"]
+                break
+        if inv_id:
+            print(json.dumps({"stage": "test-leak-invoice-reused", "record_id": inv_id},
+                             ensure_ascii=False))
+        else:
+            fields = {"Invoice No.": "TEST-VENDOR-001", "個案": [case_id],
+                      "發票類別": "供應商發票", "Invoice Date": today_ms,
+                      "Total": 1000, "貨幣": "HKD", "付款狀態": "未付"}
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{inv_tid}/records",
+                       token, payload={"fields": fields})
+            if res.get("code") != 0:
+                print(json.dumps({"stage": "test-leak-invoice", "code": res.get("code"),
+                                  "msg": res.get("msg")}, ensure_ascii=False))
+                return 1
+            inv_id = res["data"]["record"]["record_id"]
+            print(json.dumps({"stage": "test-leak-invoice", "record_id": inv_id},
+                             ensure_ascii=False))
+        print(json.dumps({"stage": "test-leak-done", "case_id": case_id,
+                          "invoice_id": inv_id}, ensure_ascii=False))
+        return 0
+
     if cmd == "fix-test-formula":
         # Repair the API-created Formula field 測試-收費總額 (broken in the
         # UI: "data source does not exist") by rewriting its property in
