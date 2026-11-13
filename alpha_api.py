@@ -427,11 +427,25 @@ def main():
         case_by_ref = {r["fields"].get("Reference No."): r["record_id"]
                        for r in cases.get("data", {}).get("items", [])}
         chgs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/records?page_size=100", token)
+        # The 個案 link value comes back as a bare list of record-id strings
+        # in list-records (not the {"record_ids": [...]} dict seen in other
+        # read-backs) — handle both shapes.
+        def link_ids(v):
+            if isinstance(v, list):
+                out = []
+                for x in v:
+                    if isinstance(x, str):
+                        out.append(x)
+                    elif isinstance(x, dict):
+                        out.append(x.get("record_id") or x.get("id"))
+                return [i for i in out if i]
+            if isinstance(v, dict):
+                return v.get("record_ids") or []
+            return []
+
         existing_charges = set()
         for r in chgs.get("data", {}).get("items", []):
-            link = r["fields"].get("個案") or {}
-            ids = link.get("record_ids") or []
-            for cid in ids:
+            for cid in link_ids(r["fields"].get("個案")):
                 existing_charges.add((cid, r["fields"].get("Charge 名稱")))
         invs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{inv_tid}/records?page_size=100", token)
         inv_by_no = {r["fields"].get("Invoice No."): r["record_id"]
