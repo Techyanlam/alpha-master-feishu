@@ -12,6 +12,11 @@ Commands:
                                "property":{"options":[{"name":"已下單","color":0}]}}. Test one field at a time.
   create-record <table_id> <record-fields-json>
                                Create one record; e.g. {"Reference No.":"AMLA2610065"}
+  build                        Build all tables from alpha_tables.json in the
+                               script's directory (phase 1: structure + links;
+                               formulas/lookups are phase 2). Creates the
+                               tables first, then fields; reuses the default
+                               primary text field as each table's first field.
   list-records <table_id>      List first page of records (values only)
 
 Credentials: JSON on stdin only, never printed or stored:
@@ -119,6 +124,79 @@ def main():
             return 1
         print(json.dumps(res.get("data", {}), ensure_ascii=False, indent=2))
         return 0
+
+    if cmd == "build":
+        import os
+        spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "alpha_tables.json")
+        with open(spec_path, encoding="utf-8") as f:
+            spec = json.load(f)
+        table_ids, failures = {}, []
+        # Phase A: create all tables first (links need target ids).
+        for t in spec["tables"]:
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables",
+                       token, payload={"table": {"name": t["name"]}})
+            if res.get("code") != 0:
+                print(json.dumps({"stage": "create-table", "table": t["name"],
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                failures.append(t["name"])
+                continue
+            tid = res["data"]["table_id"]
+            table_ids[t["name"]] = tid
+            print(json.dumps({"stage": "create-table", "table": t["name"],
+                              "table_id": tid}, ensure_ascii=False))
+        # Phase B: fields, table by table.
+        for t in spec["tables"]:
+            tid = table_ids.get(t["name"])
+            if not tid:
+                continue
+            fields = list(t.get("fields", []))
+            # Reuse the default primary text field as the first spec field.
+            existing = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=20", token)
+            done_first = False
+            items = existing.get("data", {}).get("items", []) if existing.get("code") == 0 else []
+            if len(items) == 1 and items[0].get("type") == 1 and fields and fields[0].get("type") == 1:
+                fid = items[0]["field_id"]
+                res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields/{fid}",
+                           token, payload={"field_name": fields[0]["field_name"], "type": 1})
+                print(json.dumps({"stage": "reuse-primary-field", "table": t["name"],
+                                  "field": fields[0]["field_name"],
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                # Skip the first spec field either way: the default field
+                # serves as the primary field (renamed when possible).
+                done_first = True
+                fields = fields[1:]
+            for spec_f in fields:
+                payload = {"field_name": spec_f["field_name"], "type": spec_f["type"]}
+                if spec_f["type"] in (7, 17):
+                    pass  # checkbox/attachment: omit property entirely
+                elif spec_f["type"] == 21:
+                    target = table_ids.get(spec_f.get("link_table"))
+                    if not target:
+                        print(json.dumps({"stage": "create-field", "table": t["name"],
+                                          "field": spec_f["field_name"],
+                                          "code": "NO_TARGET_TABLE",
+                                          "msg": spec_f.get("link_table")}, ensure_ascii=False))
+                        failures.append(f"{t['name']}.{spec_f['field_name']}")
+                        continue
+                    payload["property"] = {"table_id": target}
+                    if spec_f.get("property", {}).get("back_field_name"):
+                        payload["property"]["back_field_name"] = spec_f["property"]["back_field_name"]
+                elif "property" in spec_f:
+                    payload["property"] = spec_f["property"]
+                res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                           token, payload=payload)
+                print(json.dumps({"stage": "create-field", "table": t["name"],
+                                  "field": spec_f["field_name"],
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                if res.get("code") != 0:
+                    failures.append(f"{t['name']}.{spec_f['field_name']}")
+        print(json.dumps({"stage": "build-done", "tables": table_ids,
+                          "failures": failures}, ensure_ascii=False))
+        return 1 if failures else 0
 
     if cmd == "create-field":
         table_id = sys.argv[3]
