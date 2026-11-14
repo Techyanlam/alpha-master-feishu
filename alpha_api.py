@@ -39,6 +39,8 @@ Commands:
                                results so the correct shapes can be fixed from
                                the error messages if they fail. Test fields
                                are clearly named and safe to delete in the UI.
+  add-quote-date-fields        Add 報價日期 + 有效期至 (Date) to 個案主表
+                               for the quotation template (2026-11-14).
   list-records <table_id>      List first page of records (values only)
 
 Credentials: JSON on stdin only, never printed or stored:
@@ -737,6 +739,38 @@ def main():
         ok = make_formula("利潤",
                           f"bitable::$table[{case_tid}].$field[{rev_total_fid}]"
                           f"-bitable::$table[{case_tid}].$field[{cost_total_fid}]") and ok
+        return 0 if ok else 1
+
+    if cmd == "add-quote-date-fields":
+        # Quotation template (2026-11-14, Yan approved building from the
+        # draft): add two Date fields to 個案主表 — 報價日期 and 有效期至 —
+        # so DocuGenius can bind QUOTATION DATE / VALID UNTIL. Date fields
+        # (type 5) work via API; only Lookup fields need the UI. Idempotent:
+        # existing fields are skipped. Same property shape as ETD/ETA in
+        # alpha_tables.json (date_formatter yyyy/MM/dd).
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid = by_name.get("個案主表")
+        fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields?page_size=100", token)
+        existing = {f["field_name"]: f for f in fres.get("data", {}).get("items", [])}
+        ok = True
+        for name in ("報價日期", "有效期至"):
+            if name in existing:
+                print(json.dumps({"stage": "add-quote-date-fields", "field": name,
+                                  "result": "EXISTS-SKIP",
+                                  "field_id": existing[name]["field_id"]},
+                                 ensure_ascii=False))
+                continue
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/fields",
+                       token, payload={"field_name": name, "type": 5,
+                                       "property": {"auto_fill": False,
+                                                    "date_formatter": "yyyy/MM/dd"}})
+            print(json.dumps({"stage": "add-quote-date-fields", "field": name,
+                              "code": res.get("code"), "msg": res.get("msg"),
+                              "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
+                             ensure_ascii=False))
+            ok = ok and res.get("code") == 0
         return 0 if ok else 1
 
     if cmd == "create-field":
