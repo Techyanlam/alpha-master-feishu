@@ -363,6 +363,48 @@
     "發票類別": "客人發票"
    },
    "source": "INVOICE_FOR_LOGISTICS_SHPT.xlsx (AML2608109, 2026-10-07); no POL/POD/shipper/consignee in the file — left blank; SOS PO FPO26080087R0 and Job No. MSS26013 have no field in 個案主表, not stored"
+  },
+  {
+   "case": {
+    "Reference No.": "2020-CX086",
+    "業務類型": "空運",
+    "方向": "出口",
+    "Shipper": "SHENZHEN BRIGHT LIGHTING TECH.",
+    "Consignee": "RMCS IMPORTACTION EXPORTACTION",
+    "Notify Party": "",
+    "POL": "HONG KONG",
+    "POD": "MEXICO CITY",
+    "Final Destination": "",
+    "Flight／Vessel＋Voyage": "CX086",
+    "ETD": "2020-12-28",
+    "ETA": "2020-12-29",
+    "PCS": 29,
+    "Gross Weight": 492,
+    "Chargeable Weight／CBM": 598,
+    "MAWB／MBL No.": "160-22268676",
+    "HAWB／HBL No.": "",
+    "Booking／S/O No.": ""
+   },
+   "charges": [
+    {
+     "Charge 名稱": "AIRFREIGHT",
+     "CURR": "HKD",
+     "PRICE": 55,
+     "UNIT": "KG",
+     "QTY": 598,
+     "AMOUNT (HKD)": 32890,
+     "收費類別": "供應商成本"
+    }
+   ],
+   "expected_total_hkd": 32890,
+   "invoice": {
+    "Invoice No.": "2020-CX086",
+    "Invoice Date": "2020-12-28",
+    "Total": 32890,
+    "貨幣": "HKD",
+    "發票類別": "供應商發票"
+   },
+   "source": "INVOICE_FOR_EXPORT_OCEAN_SHPT.xlsx AIR sheet (2020-12-28, Flight CX086, MAWB 160-22268676); BILL TO ALPHA MASTER LOGISTICS LTD. — vendor invoice, no Invoice No./Job No. on the sheet; Reference No. '2020-CX086' is a constructed label (year+flight), changeable. 付款狀態 omitted — file does not say whether it was paid."
   }
  ]
 }
