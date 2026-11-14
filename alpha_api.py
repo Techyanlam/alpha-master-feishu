@@ -42,6 +42,10 @@ Commands:
   add-quote-date-fields        Add 報價日期 + 有效期至 (Date) to 個案主表
                                for the quotation template (2026-11-14).
   list-records <table_id>      List first page of records (values only)
+  dump-charges                 Read-only: list all 收費明細 rows grouped by
+                               (case ref, Charge 名稱) to expose duplicates.
+  dedup-charges [delete]       Delete duplicate 收費明細 rows (keep first);
+                               dry-run unless arg is exactly "delete".
 
 Credentials: JSON on stdin only, never printed or stored:
   {"app_id": "...", "app_secret": "..."}
@@ -328,8 +332,14 @@ def main():
         hkt = timezone(timedelta(hours=8))
 
         def to_ms(v):
-            if isinstance(v, str) and len(v) == 10 and v[4] == "-":
-                return int(datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=hkt).timestamp() * 1000)
+            # Strict YYYY-MM-DD only: the old len==10 + '-' check mistook
+            # identifiers like "2020-CX086" for dates (seed-all run #19 died
+            # on the Reference No. before creating the case).
+            if isinstance(v, str) and len(v) == 10 and v[4] == "-" and v[7] == "-":
+                try:
+                    return int(datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=hkt).timestamp() * 1000)
+                except ValueError:
+                    return v
             return v
 
         def clean(fields):
@@ -412,8 +422,14 @@ def main():
         hkt = timezone(timedelta(hours=8))
 
         def to_ms(v):
-            if isinstance(v, str) and len(v) == 10 and v[4] == "-":
-                return int(datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=hkt).timestamp() * 1000)
+            # Strict YYYY-MM-DD only: the old len==10 + '-' check mistook
+            # identifiers like "2020-CX086" for dates (seed-all run #19 died
+            # on the Reference No. before creating the case).
+            if isinstance(v, str) and len(v) == 10 and v[4] == "-" and v[7] == "-":
+                try:
+                    return int(datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=hkt).timestamp() * 1000)
+                except ValueError:
+                    return v
             return v
 
         def clean(fields):
@@ -810,6 +826,117 @@ def main():
             return 1
         print(json.dumps(res.get("data", {}), ensure_ascii=False, indent=2))
         return 0
+
+    if cmd == "dump-charges":
+        # Read-only: list every 收費明細 row grouped by (case ref, Charge 名稱)
+        # to expose exact duplicates. Paginates; prints record_ids per group.
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid, chg_tid = by_name.get("個案主表"), by_name.get("收費明細")
+
+        def all_records(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}"
+                       f"/records?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    print(json.dumps({"stage": "dump-charges", "code": res.get("code"),
+                                      "msg": res.get("msg")}, ensure_ascii=False))
+                    return out
+                d = res.get("data", {})
+                out.extend(d.get("items", []))
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        def link_ids(v):
+            if isinstance(v, list):
+                return [x if isinstance(x, str) else (x.get("record_id") or x.get("id"))
+                        for x in v]
+            if isinstance(v, dict):
+                return v.get("record_ids") or []
+            return []
+
+        cases = all_records(case_tid)
+        ref_by_id = {r["record_id"]: r["fields"].get("Reference No.") for r in cases}
+        rows = all_records(chg_tid)
+        groups = {}
+        for r in rows:
+            f = r["fields"]
+            for cid in link_ids(f.get("個案")):
+                key = (ref_by_id.get(cid, cid), f.get("Charge 名稱"))
+                groups.setdefault(key, []).append(r["record_id"])
+        dups = {f"{k[0]}|{k[1]}": v for k, v in sorted(groups.items()) if len(v) > 1}
+        print(json.dumps({"stage": "dump-charges", "total_rows": len(rows),
+                          "distinct_case_charge": len(groups),
+                          "duplicate_groups": dups,
+                          "duplicate_rows": sum(len(v) - 1 for v in dups.values())},
+                         ensure_ascii=False, indent=1))
+        return 0
+
+    if cmd == "dedup-charges":
+        # Delete duplicate 收費明細 rows (same case + same Charge 名稱; keep
+        # the first record_id in each group). DRY-RUN unless arg == "delete":
+        # without it, only prints what would be deleted.
+        do_delete = len(sys.argv) > 3 and sys.argv[3] == "delete"
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid, chg_tid = by_name.get("個案主表"), by_name.get("收費明細")
+
+        def all_records(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}"
+                       f"/records?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    return out
+                d = res.get("data", {})
+                out.extend(d.get("items", []))
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        def link_ids(v):
+            if isinstance(v, list):
+                return [x if isinstance(x, str) else (x.get("record_id") or x.get("id"))
+                        for x in v]
+            if isinstance(v, dict):
+                return v.get("record_ids") or []
+            return []
+
+        cases = all_records(case_tid)
+        ref_by_id = {r["record_id"]: r["fields"].get("Reference No.") for r in cases}
+        rows = all_records(chg_tid)
+        groups = {}
+        for r in rows:
+            f = r["fields"]
+            for cid in link_ids(f.get("個案")):
+                key = (ref_by_id.get(cid, cid), f.get("Charge 名稱"))
+                groups.setdefault(key, []).append(r["record_id"])
+        to_delete = []
+        for (ref, name), ids in sorted(groups.items()):
+            for rid in ids[1:]:
+                to_delete.append({"ref": ref, "charge": name, "record_id": rid})
+        deleted, failed = [], []
+        if do_delete:
+            for item in to_delete:
+                res = call("DELETE",
+                           f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}"
+                           f"/records/{item['record_id']}", token)
+                (deleted if res.get("code") == 0 else failed).append(item["record_id"])
+        print(json.dumps({"stage": "dedup-charges", "dry_run": not do_delete,
+                          "would_delete": len(to_delete),
+                          "deleted": deleted, "failed": failed},
+                         ensure_ascii=False, indent=1))
+        return 0 if not failed else 1
 
     print(f"unknown command: {cmd}")
     return 2
