@@ -445,21 +445,28 @@ def main():
         case_by_ref = {r["fields"].get("Reference No."): r["record_id"]
                        for r in cases.get("data", {}).get("items", [])}
         chgs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/records?page_size=100", token)
-        # The 個案 link value comes back as a bare list of record-id strings
-        # in list-records (not the {"record_ids": [...]} dict seen in other
-        # read-backs) — handle both shapes.
+        # The 個案 link value comes back as [{"record_ids": [...], ...}]
+        # (a single-element list holding a dict), NOT a bare list of
+        # strings — the old link_ids() missed record_ids, so the charge
+        # dedup never matched and every seed-all re-run duplicated all
+        # charges (2026-11-15: 84 rows, 3x totals). Fixed 2026-11-15.
         def link_ids(v):
-            if isinstance(v, list):
-                out = []
-                for x in v:
-                    if isinstance(x, str):
-                        out.append(x)
-                    elif isinstance(x, dict):
+            # Link fields come back as a single-element list holding a dict:
+            # [{"record_ids": [...], "table_id": ..., "text": ...,
+            #   "text_arr": [...], "type": "text"}]; an empty link has
+            # record_ids null. Also accept bare strings / record_id / id.
+            out = []
+            items = v if isinstance(v, list) else [v]
+            for x in items:
+                if isinstance(x, str):
+                    out.append(x)
+                elif isinstance(x, dict):
+                    ids = x.get("record_ids")
+                    if isinstance(ids, list):
+                        out.extend(ids)
+                    elif x.get("record_id") or x.get("id"):
                         out.append(x.get("record_id") or x.get("id"))
-                return [i for i in out if i]
-            if isinstance(v, dict):
-                return v.get("record_ids") or []
-            return []
+            return [i for i in out if i]
 
         existing_charges = set()
         for r in chgs.get("data", {}).get("items", []):
@@ -854,12 +861,22 @@ def main():
                 page_token = d.get("page_token")
 
         def link_ids(v):
-            if isinstance(v, list):
-                return [x if isinstance(x, str) else (x.get("record_id") or x.get("id"))
-                        for x in v]
-            if isinstance(v, dict):
-                return v.get("record_ids") or []
-            return []
+            # Link fields come back as a single-element list holding a dict:
+            # [{"record_ids": [...], "table_id": ..., "text": ...,
+            #   "text_arr": [...], "type": "text"}]; an empty link has
+            # record_ids null. Also accept bare strings / record_id / id.
+            out = []
+            items = v if isinstance(v, list) else [v]
+            for x in items:
+                if isinstance(x, str):
+                    out.append(x)
+                elif isinstance(x, dict):
+                    ids = x.get("record_ids")
+                    if isinstance(ids, list):
+                        out.extend(ids)
+                    elif x.get("record_id") or x.get("id"):
+                        out.append(x.get("record_id") or x.get("id"))
+            return [i for i in out if i]
 
         cases = all_records(case_tid)
         ref_by_id = {r["record_id"]: r["fields"].get("Reference No.") for r in cases}
@@ -905,12 +922,22 @@ def main():
                 page_token = d.get("page_token")
 
         def link_ids(v):
-            if isinstance(v, list):
-                return [x if isinstance(x, str) else (x.get("record_id") or x.get("id"))
-                        for x in v]
-            if isinstance(v, dict):
-                return v.get("record_ids") or []
-            return []
+            # Link fields come back as a single-element list holding a dict:
+            # [{"record_ids": [...], "table_id": ..., "text": ...,
+            #   "text_arr": [...], "type": "text"}]; an empty link has
+            # record_ids null. Also accept bare strings / record_id / id.
+            out = []
+            items = v if isinstance(v, list) else [v]
+            for x in items:
+                if isinstance(x, str):
+                    out.append(x)
+                elif isinstance(x, dict):
+                    ids = x.get("record_ids")
+                    if isinstance(ids, list):
+                        out.extend(ids)
+                    elif x.get("record_id") or x.get("id"):
+                        out.append(x.get("record_id") or x.get("id"))
+            return [i for i in out if i]
 
         cases = all_records(case_tid)
         ref_by_id = {r["record_id"]: r["fields"].get("Reference No.") for r in cases}
