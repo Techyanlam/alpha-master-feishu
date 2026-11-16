@@ -58,11 +58,10 @@ Commands:
   dedup-charges [delete]       Delete duplicate 收費明細 rows (keep first);
                                dry-run unless arg is exactly "delete".
   auto-create-cases [run]       Scan 客人落單認讀 for rows with 認讀狀態
-                               開案 and no linked case; generate the next
-                               Reference No. (AML + letter + YYMM + serial,
-                               per letter+YYMM max+1), create the case in
-                               個案主表, link it back and write the number
-                               into 已開個案 Reference No. Dry-run unless
+                               開案 and no linked case; use the row's
+                               Reference No. (Numbering field) as the
+                               case's Reference No., create the case in
+                               個案主表, link it back. Dry-run unless
                                arg is exactly "run".
   update-record <table_id> <record_id> <fields-json>
                                Update one record's fields (PUT). One record
@@ -1232,18 +1231,17 @@ def main():
     if cmd == "auto-create-cases":
         # Auto-open cases from recognised bookings (2026-11-16): scan
         # 客人落單認讀 for rows whose 認讀狀態 is 開案 and whose 個案 link
-        # is still empty; for each, generate the next Reference No. and
-        # create the case in 個案主表, then link it back to the booking row
-        # and write the generated number into 已開個案 Reference No.
-        # DRY-RUN unless arg is exactly "run". Idempotent: rows already
-        # linked are skipped, and the in-run serial map is updated after
-        # each creation so two bookings in one run never share a number.
-        # Number rule (Yan 2026-11-16, 待核實): AML + letter + YYMM +
-        # 3-digit serial, per (letter, YYMM) max+1. Letter: 出口空運 A,
-        # 出口海運 S, otherwise none (matches the 5 sample cases).
-        # YYMM comes from the booking's 收到日期 (case-opening month — the
-        # AMLS2610002 sample proves it is NOT the ETD month: number 2610
-        # but ETD 2026-11-01). 「無」 in any recognised cell = blank.
+        # is still empty; for each, use the row's Reference No. as the
+        # case's Reference No. and create the case in 個案主表, then link
+        # it back to the booking row. DRY-RUN unless arg is exactly "run".
+        # Idempotent: rows already linked are skipped.
+        # The number comes from the booking row's Reference No. Numbering
+        # field (set up by Yan in the UI 2026-11-16: AML + YYYYMM +
+        # 3-digit serial, e.g. AML202611001) — it is NEVER generated here,
+        # and the link-back never writes it (a Numbering field is
+        # read-only; writing it fails with 1254045, which is how the
+        # first end-to-end test left an orphan case in run #42).
+        # 「無」 in any recognised cell = blank.
         import re
         from datetime import datetime, timezone, timedelta
         hkt = timezone(timedelta(hours=8))
@@ -1322,16 +1320,10 @@ def main():
             return v is None or v == "" or v == "無"
 
         cases = all_records(case_tid)
-        ref_pat = re.compile(r"^AML([AS]?)(\d{4})(\d{3})$")
-        serial_max = {}
         by_ref = {}
         for r in cases:
             ref = (r.get("fields") or {}).get("Reference No.")
             by_ref[ref] = r["record_id"]
-            m = ref_pat.match(ref or "")
-            if m:
-                key = (m.group(1), m.group(2))
-                serial_max[key] = max(serial_max.get(key, 0), int(m.group(3)))
 
         bookings = all_records(book_tid)
         candidates, created, skipped, failed = [], [], [], []
@@ -1346,20 +1338,13 @@ def main():
             warnings = []
             btype = sel_name(f.get("業務類型"))
             direction = sel_name(f.get("方向"))
-            letter = ""
-            if direction == "出口" and btype == "空運":
-                letter = "A"
-            elif direction == "出口" and btype == "海運":
-                letter = "S"
-            recv = f.get("收到日期")
-            if isinstance(recv, (int, float)) and recv:
-                yymm = datetime.fromtimestamp(recv / 1000, tz=hkt).strftime("%y%m")
-            else:
-                yymm = datetime.now(tz=hkt).strftime("%y%m")
-                warnings.append("收到日期 missing, YYMM from today")
-            key = (letter, yymm)
-            serial = serial_max.get(key, 0) + 1
-            ref = f"AML{letter}{yymm}{serial:03d}"
+            # The Reference No. comes from the booking row's Numbering
+            # field — never generated here. Blank means the row has no
+            # number yet: skip it rather than inventing one.
+            ref = f.get("Reference No.") or f.get("已開個案 Reference No.")
+            if not ref or not isinstance(ref, str):
+                skipped.append({"booking": b["record_id"], "reason": "NO-REF"})
+                continue
             case_fields = {"Reference No.": ref, "狀態": "已下單"}
             if not blank(btype):
                 case_fields["業務類型"] = btype
@@ -1397,10 +1382,10 @@ def main():
                                "code": res.get("code"), "msg": res.get("msg")})
                 continue
             by_ref[ref] = case_id
-            serial_max[key] = serial
+            # Link back only — the Reference No. is a Numbering field
+            # (read-only); never write it.
             upd = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{book_tid}/records/{b['record_id']}",
-                       token, payload={"fields": {"個案": [case_id],
-                                                  "已開個案 Reference No.": ref}})
+                       token, payload={"fields": {"個案": [case_id]}})
             if upd.get("code") != 0:
                 failed.append({**item, "case_id": case_id,
                                "reason": "LINK-FAILED-ORPHAN-CASE",
