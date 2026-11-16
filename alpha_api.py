@@ -41,6 +41,9 @@ Commands:
                                are clearly named and safe to delete in the UI.
   add-quote-date-fields        Add 報價日期 + 有效期至 (Date) to 個案主表
                                for the quotation template (2026-11-14).
+  build-booking-table          Create the 客人落單認讀 table (AI recognition
+                               staging for customer bookings) with all fields.
+                               Idempotent; AI shortcuts are attached in the UI.
   list-records <table_id>      List first page of records (values only)
   dump-charges                 Read-only: list all 收費明細 rows grouped by
                                (case ref, Charge 名稱) to expose duplicates.
@@ -794,6 +797,111 @@ def main():
                               "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
                              ensure_ascii=False))
             ok = ok and res.get("code") == 0
+        return 0 if ok else 1
+
+    if cmd == "build-booking-table":
+        # New table 客人落單認讀 (2026-11-16, Yan: 認客人 send 嚟嘅 booking).
+        # Staging table for AI recognition of customer order forms: the
+        # booking file goes in 落單檔案 (Attachment); the AI 圖片理解 field
+        # shortcut (UI only — cannot be created via API) is then attached
+        # to each Text column below, pointing at 落單檔案, one custom
+        # instruction per column. AI fills Text columns only, so every
+        # extracted value is Text (dates/numbers as text, verified by a
+        # human before a case row is opened in 個案主表). Idempotent:
+        # existing table/fields are reused, never duplicated.
+        # NOTE: no link field to 個案主表 — a TwoWayLink would add a
+        # reverse-link column to 個案主表 (36 fields); the opened case is
+        # recorded instead in 已開個案 Reference No. (manual text).
+        TABLE_NAME = "客人落單認讀"
+        # (field_name, type, property-or-None); type 17 omits property.
+        FIELDS = [
+            ("落單標題", 1, None),
+            ("落單檔案", 17, None),
+            ("收到日期", 5, {"auto_fill": False, "date_formatter": "yyyy/MM/dd"}),
+            ("業務類型", 3, {"options": [{"name": "空運", "color": 0},
+                                      {"name": "海運", "color": 1},
+                                      {"name": "本地派送", "color": 2},
+                                      {"name": "物流服務", "color": 3}]}),
+            ("方向", 3, {"options": [{"name": "出口", "color": 0},
+                                    {"name": "進口", "color": 1}]}),
+            ("Shipper", 1, None),
+            ("Consignee", 1, None),
+            ("Notify Party", 1, None),
+            ("POL", 1, None),
+            ("POD", 1, None),
+            ("Flight／Vessel＋Voyage", 1, None),
+            ("ETD", 1, None),
+            ("ETA", 1, None),
+            ("PCS", 1, None),
+            ("Gross Weight", 1, None),
+            ("Chargeable Weight／CBM", 1, None),
+            ("MAWB／MBL No.", 1, None),
+            ("HAWB／HBL No.", 1, None),
+            ("貨品描述", 1, None),
+            ("認讀狀態", 3, {"options": [{"name": "待認讀", "color": 0},
+                                       {"name": "已認讀待核對", "color": 1},
+                                       {"name": "已核對", "color": 2},
+                                       {"name": "已開案", "color": 3}]}),
+            ("已開個案 Reference No.", 1, None),
+            ("備註", 1, None),
+        ]
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        if TABLE_NAME in by_name:
+            tid = by_name[TABLE_NAME]
+            is_new = False
+            print(json.dumps({"stage": "build-booking-table", "table": TABLE_NAME,
+                              "result": "EXISTS-REUSE", "table_id": tid},
+                             ensure_ascii=False))
+        else:
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables",
+                       token, payload={"table": {"name": TABLE_NAME}})
+            if res.get("code") != 0:
+                print(json.dumps({"stage": "build-booking-table", "table": TABLE_NAME,
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                return 1
+            tid = res["data"]["table_id"]
+            is_new = True
+            print(json.dumps({"stage": "build-booking-table", "table": TABLE_NAME,
+                              "result": "CREATED", "table_id": tid},
+                             ensure_ascii=False))
+        fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        items = fres.get("data", {}).get("items", []) if fres.get("code") == 0 else []
+        existing = {f["field_name"] for f in items}
+        # New table only: reuse the default primary text field as 落單標題.
+        todo = list(FIELDS)
+        if is_new and len(items) == 1 and items[0].get("type") == 1 and todo and todo[0][1] == 1:
+            fid = items[0]["field_id"]
+            res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields/{fid}",
+                       token, payload={"field_name": todo[0][0], "type": 1})
+            print(json.dumps({"stage": "build-booking-table", "field": todo[0][0],
+                              "result": "REUSE-PRIMARY-FIELD",
+                              "code": res.get("code"), "msg": res.get("msg")},
+                             ensure_ascii=False))
+            todo = todo[1:]
+            existing.add(FIELDS[0][0])
+        ok = True
+        for name, ftype, prop in todo:
+            if name in existing:
+                print(json.dumps({"stage": "build-booking-table", "field": name,
+                                  "result": "EXISTS-SKIP"}, ensure_ascii=False))
+                continue
+            payload = {"field_name": name, "type": ftype}
+            if prop is not None:
+                payload["property"] = prop
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                       token, payload=payload)
+            print(json.dumps({"stage": "build-booking-table", "field": name,
+                              "type": ftype, "code": res.get("code"),
+                              "msg": res.get("msg"),
+                              "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
+                             ensure_ascii=False))
+            ok = ok and res.get("code") == 0
+        print(json.dumps({"stage": "build-booking-table-done", "table": TABLE_NAME,
+                          "table_id": tid, "field_count": len(FIELDS)},
+                         ensure_ascii=False))
         return 0 if ok else 1
 
     if cmd == "create-field":
