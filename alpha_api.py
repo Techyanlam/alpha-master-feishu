@@ -44,6 +44,9 @@ Commands:
   build-booking-table          Create the 客人落單認讀 table (AI recognition
                                staging for customer bookings) with all fields.
                                Idempotent; AI shortcuts are attached in the UI.
+  add-booking-case-link        Add the 個案 link field to 客人落單認讀 (linking
+                               each recognised booking to its 個案主表 row;
+                               back-link 客人落單認讀 appears in 個案主表).
   list-records <table_id>      List first page of records (values only)
   dump-charges                 Read-only: list all 收費明細 rows grouped by
                                (case ref, Charge 名稱) to expose duplicates.
@@ -903,6 +906,41 @@ def main():
                           "table_id": tid, "field_count": len(FIELDS)},
                          ensure_ascii=False))
         return 0 if ok else 1
+
+    if cmd == "add-booking-case-link":
+        # Link recognised bookings to their case (2026-11-16, Yan: 認完之後
+        # 連結個案主表). Adds a TwoWayLink field 個案 to 客人落單認讀
+        # pointing at 個案主表; the reverse link 客人落單認讀 appears in
+        # 個案主表, so its field count goes 36 -> 37 (manual v1.2 needs a
+        # v1.3 note). Same naming as 收費明細/發票/文件's 個案 link.
+        # Idempotent: skips if the field already exists. Run AFTER
+        # build-booking-table has created the table.
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        book_tid, case_tid = by_name.get("客人落單認讀"), by_name.get("個案主表")
+        if not book_tid or not case_tid:
+            print(json.dumps({"stage": "add-booking-case-link",
+                              "result": "MISSING-TABLE",
+                              "booking_table": book_tid, "case_table": case_tid},
+                             ensure_ascii=False))
+            return 1
+        fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{book_tid}/fields?page_size=100", token)
+        existing = {f["field_name"] for f in fres.get("data", {}).get("items", [])}
+        if "個案" in existing:
+            print(json.dumps({"stage": "add-booking-case-link", "field": "個案",
+                              "result": "EXISTS-SKIP", "table_id": book_tid},
+                             ensure_ascii=False))
+            return 0
+        res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{book_tid}/fields",
+                   token, payload={"field_name": "個案", "type": 21,
+                                   "property": {"table_id": case_tid,
+                                                "back_field_name": "客人落單認讀"}})
+        print(json.dumps({"stage": "add-booking-case-link", "field": "個案",
+                          "code": res.get("code"), "msg": res.get("msg"),
+                          "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
+                         ensure_ascii=False))
+        return 0 if res.get("code") == 0 else 1
 
     if cmd == "create-field":
         table_id = sys.argv[3]
