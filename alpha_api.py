@@ -49,6 +49,9 @@ Commands:
                                back-link 客人落單認讀 appears in 個案主表).
   seed-cases-docs            Create the AMLA2610065 + AMLS2610002 cases from
                                Yan's 2026-11-16 document files (idempotent).
+  delete-empty-case-record   Delete the empty 個案主表 record reczz28aBFhqkc7h
+                               ONLY if it is still completely empty; refuses
+                               otherwise (safety re-check before delete).
   list-records <table_id>      List first page of records (values only)
   dump-charges                 Read-only: list all 收費明細 rows grouped by
                                (case ref, Charge 名稱) to expose duplicates.
@@ -1004,6 +1007,36 @@ def main():
                              ensure_ascii=False))
             ok = ok and res.get("code") == 0
         return 0 if ok else 1
+
+    if cmd == "delete-empty-case-record":
+        # Delete the empty 個案主表 record reczz28aBFhqkc7h (found 2026-11-16
+        # run #34: every field null/0; almost certainly the empty row the
+        # v1.2-verification browser task created and reported deleted).
+        # SAFETY: re-reads the record first and deletes ONLY if it is still
+        # completely empty; refuses if any content field is non-empty.
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid = by_name.get("個案主表")
+        rid = "reczz28aBFhqkc7h"
+        rec = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records/{rid}", token)
+        fields = (rec.get("data", {}) or {}).get("record", {}).get("fields", {}) or {}
+        content = {k: v for k, v in fields.items()
+                   if v not in (None, "", [], 0, 0.0)}
+        print(json.dumps({"stage": "delete-empty-case-record", "record_id": rid,
+                          "code": rec.get("code"), "content_fields": content},
+                         ensure_ascii=False))
+        if rec.get("code") != 0:
+            return 1
+        if content:
+            print(json.dumps({"stage": "delete-empty-case-record",
+                              "result": "REFUSED-NOT-EMPTY"}, ensure_ascii=False))
+            return 1
+        res = call("DELETE", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records/{rid}", token)
+        print(json.dumps({"stage": "delete-empty-case-record", "result": "DELETED",
+                          "code": res.get("code"), "msg": res.get("msg")},
+                         ensure_ascii=False))
+        return 0 if res.get("code") == 0 else 1
 
     if cmd == "create-field":
         table_id = sys.argv[3]
