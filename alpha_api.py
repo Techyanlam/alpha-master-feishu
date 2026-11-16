@@ -57,6 +57,16 @@ Commands:
                                (case ref, Charge 名稱) to expose duplicates.
   dedup-charges [delete]       Delete duplicate 收費明細 rows (keep first);
                                dry-run unless arg is exactly "delete".
+  auto-create-cases [run]       Scan 客人落單認讀 for rows with 認讀狀態
+                               開案 and no linked case; generate the next
+                               Reference No. (AML + letter + YYMM + serial,
+                               per letter+YYMM max+1), create the case in
+                               個案主表, link it back and write the number
+                               into 已開個案 Reference No. Dry-run unless
+                               arg is exactly "run".
+  update-record <table_id> <record_id> <fields-json>
+                               Update one record's fields (PUT). One record
+                               at a time, explicit ids only.
 
 Credentials: JSON on stdin only, never printed or stored:
   {"app_id": "...", "app_secret": "..."}
@@ -1218,6 +1228,204 @@ def main():
                           "deleted": deleted, "failed": failed},
                          ensure_ascii=False, indent=1))
         return 0 if not failed else 1
+
+    if cmd == "auto-create-cases":
+        # Auto-open cases from recognised bookings (2026-11-16): scan
+        # 客人落單認讀 for rows whose 認讀狀態 is 開案 and whose 個案 link
+        # is still empty; for each, generate the next Reference No. and
+        # create the case in 個案主表, then link it back to the booking row
+        # and write the generated number into 已開個案 Reference No.
+        # DRY-RUN unless arg is exactly "run". Idempotent: rows already
+        # linked are skipped, and the in-run serial map is updated after
+        # each creation so two bookings in one run never share a number.
+        # Number rule (Yan 2026-11-16, 待核實): AML + letter + YYMM +
+        # 3-digit serial, per (letter, YYMM) max+1. Letter: 出口空運 A,
+        # 出口海運 S, otherwise none (matches the 5 sample cases).
+        # YYMM comes from the booking's 收到日期 (case-opening month — the
+        # AMLS2610002 sample proves it is NOT the ETD month: number 2610
+        # but ETD 2026-11-01). 「無」 in any recognised cell = blank.
+        import re
+        from datetime import datetime, timezone, timedelta
+        hkt = timezone(timedelta(hours=8))
+        do_run = len(sys.argv) > 3 and sys.argv[3] == "run"
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid = by_name.get("個案主表")
+        book_tid = by_name.get("客人落單認讀")
+
+        def all_records(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}"
+                       f"/records?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    print(json.dumps({"stage": "auto-create-cases",
+                                      "code": res.get("code"),
+                                      "msg": res.get("msg")}, ensure_ascii=False))
+                    return out
+                d = res.get("data", {})
+                out.extend(d.get("items", []))
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        def link_ids(v):
+            out = []
+            items = v if isinstance(v, list) else [v]
+            for x in items:
+                if isinstance(x, str):
+                    out.append(x)
+                elif isinstance(x, dict):
+                    ids = x.get("record_ids")
+                    if isinstance(ids, list):
+                        out.extend(ids)
+                    elif x.get("record_id") or x.get("id"):
+                        out.append(x.get("record_id") or x.get("id"))
+            return [i for i in out if i]
+
+        def sel_name(v):
+            # SingleSelect reads back as its option name (string); accept
+            # a dict shape too, and the raw option id as a fallback.
+            if isinstance(v, str):
+                return v
+            if isinstance(v, dict):
+                return v.get("name") or v.get("text") or v.get("id") or ""
+            return ""
+
+        def to_ms(v):
+            if isinstance(v, str) and len(v) == 10 and v[4] == "-" and v[7] == "-":
+                try:
+                    return int(datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=hkt).timestamp() * 1000)
+                except ValueError:
+                    return v
+            return v
+
+        def to_num(v):
+            # Booking text columns hold strings like "28", "1336",
+            # "1336KGS" — take the leading number for the case's Number
+            # fields; None when there is no number at all.
+            if isinstance(v, (int, float)):
+                return v
+            if isinstance(v, str):
+                m = re.search(r"-?\d+(?:\.\d+)?", v)
+                if not m:
+                    return None
+                n = float(m.group(0))
+                return int(n) if n == int(n) else n
+            return None
+
+        def blank(v):
+            return v is None or v == "" or v == "無"
+
+        cases = all_records(case_tid)
+        ref_pat = re.compile(r"^AML([AS]?)(\d{4})(\d{3})$")
+        serial_max = {}
+        by_ref = {}
+        for r in cases:
+            ref = (r.get("fields") or {}).get("Reference No.")
+            by_ref[ref] = r["record_id"]
+            m = ref_pat.match(ref or "")
+            if m:
+                key = (m.group(1), m.group(2))
+                serial_max[key] = max(serial_max.get(key, 0), int(m.group(3)))
+
+        bookings = all_records(book_tid)
+        candidates, created, skipped, failed = [], [], [], []
+        for b in bookings:
+            f = b.get("fields") or {}
+            status = sel_name(f.get("認讀狀態"))
+            if status not in ("開案", "opto3Yy36c"):
+                continue
+            if link_ids(f.get("個案")):
+                skipped.append({"booking": b["record_id"], "reason": "ALREADY-LINKED"})
+                continue
+            warnings = []
+            btype = sel_name(f.get("業務類型"))
+            direction = sel_name(f.get("方向"))
+            letter = ""
+            if direction == "出口" and btype == "空運":
+                letter = "A"
+            elif direction == "出口" and btype == "海運":
+                letter = "S"
+            recv = f.get("收到日期")
+            if isinstance(recv, (int, float)) and recv:
+                yymm = datetime.fromtimestamp(recv / 1000, tz=hkt).strftime("%y%m")
+            else:
+                yymm = datetime.now(tz=hkt).strftime("%y%m")
+                warnings.append("收到日期 missing, YYMM from today")
+            key = (letter, yymm)
+            serial = serial_max.get(key, 0) + 1
+            ref = f"AML{letter}{yymm}{serial:03d}"
+            case_fields = {"Reference No.": ref, "狀態": "已下單"}
+            if not blank(btype):
+                case_fields["業務類型"] = btype
+            if not blank(direction):
+                case_fields["方向"] = direction
+            for src in ("Shipper", "Consignee", "Notify Party", "POL", "POD",
+                        "Flight／Vessel＋Voyage", "MAWB／MBL No.", "HAWB／HBL No."):
+                if not blank(f.get(src)):
+                    case_fields[src] = f[src]
+            for src in ("ETD", "ETA"):
+                if not blank(f.get(src)):
+                    ms = to_ms(f[src])
+                    if isinstance(ms, int):
+                        case_fields[src] = ms
+                    else:
+                        warnings.append(f"{src} not a date, skipped: {f[src]}")
+            for src in ("PCS", "Gross Weight", "Chargeable Weight／CBM"):
+                n = to_num(f.get(src))
+                if n is not None:
+                    case_fields[src] = n
+            item = {"booking": b["record_id"],
+                    "title": f.get("落單標題"), "ref": ref,
+                    "warnings": warnings, "case_fields": case_fields}
+            candidates.append(item)
+            if not do_run:
+                continue
+            if ref in by_ref:
+                failed.append({**item, "reason": "REF-EXISTS"})
+                continue
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records",
+                       token, payload={"fields": case_fields})
+            case_id = (res.get("data", {}) or {}).get("record", {}).get("record_id")
+            if res.get("code") != 0 or not case_id:
+                failed.append({**item, "reason": "CREATE-FAILED",
+                               "code": res.get("code"), "msg": res.get("msg")})
+                continue
+            by_ref[ref] = case_id
+            serial_max[key] = serial
+            upd = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{book_tid}/records/{b['record_id']}",
+                       token, payload={"fields": {"個案": [case_id],
+                                                  "已開個案 Reference No.": ref}})
+            if upd.get("code") != 0:
+                failed.append({**item, "case_id": case_id,
+                               "reason": "LINK-FAILED-ORPHAN-CASE",
+                               "code": upd.get("code"), "msg": upd.get("msg")})
+                continue
+            created.append({**item, "case_id": case_id})
+        print(json.dumps({"stage": "auto-create-cases", "dry_run": not do_run,
+                          "candidates": candidates, "created": created,
+                          "skipped": skipped, "failed": failed},
+                         ensure_ascii=False, indent=1))
+        return 0 if not failed else 1
+
+    if cmd == "update-record":
+        # One-record field update: update-record <table_id> <record_id>
+        # <fields-json>. Used for small fixes (e.g. flipping a booking
+        # row's 認讀狀態 for an auto-create test). One record at a time,
+        # explicit ids only — never a bulk update.
+        table_id, record_id = sys.argv[3], sys.argv[4]
+        fields = json.loads(sys.argv[5])
+        res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
+                   token, payload={"fields": fields})
+        print(json.dumps({"stage": "update-record", "table_id": table_id,
+                          "record_id": record_id, "code": res.get("code"),
+                          "msg": res.get("msg")}, ensure_ascii=False))
+        return 0 if res.get("code") == 0 else 1
 
     print(f"unknown command: {cmd}")
     return 2
