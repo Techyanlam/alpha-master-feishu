@@ -47,6 +47,8 @@ Commands:
   add-booking-case-link        Add the 個案 link field to 客人落單認讀 (linking
                                each recognised booking to its 個案主表 row;
                                back-link 客人落單認讀 appears in 個案主表).
+  seed-cases-docs            Create the AMLA2610065 + AMLS2610002 cases from
+                               Yan's 2026-11-16 document files (idempotent).
   list-records <table_id>      List first page of records (values only)
   dump-charges                 Read-only: list all 收費明細 rows grouped by
                                (case ref, Charge 名稱) to expose duplicates.
@@ -941,6 +943,67 @@ def main():
                           "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
                          ensure_ascii=False))
         return 0 if res.get("code") == 0 else 1
+
+    if cmd == "seed-cases-docs":
+        # Create the two cases behind Yan's 2026-11-16 document files
+        # (manifest + HAWB = AMLA2610065 air export; HBL = AMLS2610002
+        # ocean export) so their files can be filed in the 文件 table and
+        # shown from 個案主表. Idempotent by Reference No. — a re-run
+        # reuses the cases. Shipper/Consignee are XXXXXXXXX (redacted) in
+        # the files, so they stay blank; 狀態/收款狀態/付款狀態 unknown,
+        # also blank. AMLS2610002 ETD 2026-11-01: year inferred from the
+        # Oct 2026 batch (file prints "1-NOV" only) — flagged to Yan.
+        import os
+        from datetime import datetime, timezone, timedelta
+        hkt = timezone(timedelta(hours=8))
+
+        def to_ms(v):
+            if isinstance(v, str) and len(v) == 10 and v[4] == "-" and v[7] == "-":
+                try:
+                    return int(datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=hkt).timestamp() * 1000)
+                except ValueError:
+                    return v
+            return v
+
+        def clean(fields):
+            return {k: to_ms(v) for k, v in fields.items()
+                    if not (isinstance(v, str) and v == "")}
+
+        CASES = [
+            {"Reference No.": "AMLA2610065", "業務類型": "空運", "方向": "出口",
+             "POL": "HKG", "POD": "FRA",
+             "Flight／Vessel＋Voyage": "EK9845", "ETD": "2026-10-31",
+             "PCS": 7, "Gross Weight": 132, "Chargeable Weight／CBM": 132,
+             "MAWB／MBL No.": "176-64464621", "HAWB／HBL No.": "AMLA2610065"},
+            {"Reference No.": "AMLS2610002", "業務類型": "海運", "方向": "出口",
+             "POL": "HONG KONG", "POD": "KEELUNG",
+             "Flight／Vessel＋Voyage": "TS PUSAN 2617N", "ETD": "2026-11-01",
+             "PCS": 8, "Gross Weight": 100, "Chargeable Weight／CBM": 0.333,
+             "MAWB／MBL No.": "AMLS2610002", "HAWB／HBL No.": "AMLS2610002"},
+        ]
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid = by_name.get("個案主表")
+        recs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records?page_size=100", token)
+        by_ref = {r["fields"].get("Reference No."): r["record_id"]
+                  for r in recs.get("data", {}).get("items", [])}
+        ok = True
+        for case in CASES:
+            ref = case["Reference No."]
+            if ref in by_ref:
+                print(json.dumps({"stage": "seed-cases-docs", "ref": ref,
+                                  "result": "EXISTS-REUSE",
+                                  "record_id": by_ref[ref]}, ensure_ascii=False))
+                continue
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records",
+                       token, payload={"fields": clean(case)})
+            print(json.dumps({"stage": "seed-cases-docs", "ref": ref,
+                              "code": res.get("code"), "msg": res.get("msg"),
+                              "record_id": (res.get("data", {}) or {}).get("record", {}).get("record_id")},
+                             ensure_ascii=False))
+            ok = ok and res.get("code") == 0
+        return 0 if ok else 1
 
     if cmd == "create-field":
         table_id = sys.argv[3]
