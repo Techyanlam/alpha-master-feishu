@@ -1021,8 +1021,20 @@ def main():
         rid = "reczz28aBFhqkc7h"
         rec = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records/{rid}", token)
         fields = (rec.get("data", {}) or {}).get("record", {}).get("fields", {}) or {}
-        content = {k: v for k, v in fields.items()
-                   if v not in (None, "", [], 0, 0.0)}
+
+        def is_empty(v):
+            # Blank values: null / "" / [] / 0. Also an empty link field,
+            # which reads back as [{"record_ids": null, ...}] (see the
+            # link-field read shape) — a list of null-link dicts is empty.
+            if v in (None, "", [], 0, 0.0):
+                return True
+            if isinstance(v, list):
+                return all(isinstance(e, dict)
+                           and e.get("record_ids") in (None, [])
+                           for e in v)
+            return False
+
+        content = {k: v for k, v in fields.items() if not is_empty(v)}
         print(json.dumps({"stage": "delete-empty-case-record", "record_id": rid,
                           "code": rec.get("code"), "content_fields": content},
                          ensure_ascii=False))
