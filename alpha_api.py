@@ -63,6 +63,17 @@ Commands:
                                case's Reference No., create the case in
                                個案主表, link it back. Dry-run unless
                                arg is exactly "run".
+  repair-20261119 [run]      Repair the data damage found 2026-11-19
+                               when the live connection first read the
+                               Base: delete the 11 duplicate charge rows
+                               under AML202611004, restore the 36 charge
+                               rows (CURR/PRICE/UNIT/QTY/AMOUNT (HKD)/
+                               收費類別) and the 6 invoice rows (發票類別/
+                               Total/貨幣/付款狀態) from alpha_seed.json
+                               + alpha_seed_all.json, restore 3 case
+                               statuses, delete the empty case record
+                               reczz28abUPqE7OJ. Dry-run unless arg is
+                               exactly "run".
   update-record <table_id> <record_id> <fields-json>
                                Update one record's fields (PUT). One record
                                at a time, explicit ids only.
@@ -1397,6 +1408,346 @@ def main():
                           "skipped": skipped, "failed": failed},
                          ensure_ascii=False, indent=1))
         return 0 if not failed else 1
+
+    if cmd == "repair-20261119":
+        # Repair the data damage found 2026-11-19 11:24 when the live
+        # connection first read the Base: 收費明細 grew 36 -> 47 rows
+        # (11 duplicates under AML202611004), the 36 original charge
+        # rows had AMOUNT (HKD) rewritten to PRICE x QTY in the original
+        # currency (FX conversion lost) and CURR/PRICE/UNIT/QTY/收費類別
+        # blanked, the 6 invoice rows lost 發票類別/Total/貨幣/付款狀態,
+        # 3 case statuses changed, and one empty case record appeared.
+        # Target state = the 2026-11-16 verified snapshot in
+        # alpha_seed.json + alpha_seed_all.json (both live next to this
+        # script in the repo). Dry-run unless arg is exactly "run".
+        # Fail-stop: any refused gate or failed write returns 1 at once.
+        # Never touches 客戶表 / 標準費率 / 文件表 / 客人落單認讀表, and
+        # writes nothing on 個案主表 except the 3 statuses in step (d).
+        import os
+        do_run = len(sys.argv) > 3 and sys.argv[3] == "run"
+        spec_dir = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(spec_dir, "alpha_seed.json"), encoding="utf-8") as f:
+            seed040 = json.load(f)
+        with open(os.path.join(spec_dir, "alpha_seed_all.json"), encoding="utf-8") as f:
+            seeds_all = json.load(f)["cases"]
+        seed_charges, seed_invoices, expected_totals = {}, {}, {}
+        for s in [seed040] + seeds_all:
+            ref = s["case"]["Reference No."]
+            for ch in s["charges"]:
+                seed_charges[(ref, ch["Charge 名稱"])] = {
+                    "CURR": ch["CURR"], "PRICE": ch["PRICE"],
+                    "UNIT": ch["UNIT"], "QTY": ch["QTY"],
+                    "AMOUNT (HKD)": ch["AMOUNT (HKD)"],
+                    "收費類別": ch["收費類別"]}
+            inv = s["invoice"]
+            seed_invoices[inv["Invoice No."]] = {
+                k: inv[k] for k in ("發票類別", "Total", "貨幣", "付款狀態")
+                if k in inv}
+            expected_totals[ref] = s["expected_total_hkd"]
+        names040 = sorted(n for (r, n) in seed_charges if r == "AMLA2606040")
+        target_status = {"AMLA2606040": "已開票",
+                         "AML202611003": "已下單",
+                         "AML202611004": "已下單"}
+        empty_rid = "reczz28abUPqE7OJ"
+        print(json.dumps({"stage": "repair-20261119-start", "dry_run": not do_run,
+                          "target": "2026-11-16 verified snapshot (alpha_seed.json + alpha_seed_all.json)",
+                          "seed_charge_keys": len(seed_charges),
+                          "seed_invoices": len(seed_invoices)},
+                         ensure_ascii=False))
+
+        def fail(step, reason, extra=None):
+            out = {"stage": "repair-20261119", "step": step,
+                   "result": "REFUSED", "reason": reason}
+            if extra:
+                out.update(extra)
+            print(json.dumps(out, ensure_ascii=False))
+            return 1
+
+        def all_records(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}"
+                       f"/records?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    return None
+                d = res.get("data", {})
+                out.extend(d.get("items", []))
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        def link_ids(v):
+            # Link fields come back as a single-element list holding a dict:
+            # [{"record_ids": [...], "table_id": ..., "text": ...,
+            #   "text_arr": [...], "type": "text"}]; an empty link has
+            # record_ids null. Also accept bare strings / record_id / id.
+            out = []
+            items = v if isinstance(v, list) else [v]
+            for x in items:
+                if isinstance(x, str):
+                    out.append(x)
+                elif isinstance(x, dict):
+                    ids = x.get("record_ids")
+                    if isinstance(ids, list):
+                        out.extend(ids)
+                    elif x.get("record_id") or x.get("id"):
+                        out.append(x.get("record_id") or x.get("id"))
+            return [i for i in out if i]
+
+        def is_empty(v):
+            # Blank values: null / "" / [] / 0. Also an empty link field,
+            # which reads back as [{"record_ids": null, ...}] — a list of
+            # null-link dicts is empty. (Same check as
+            # delete-empty-case-record.)
+            if v in (None, "", [], 0, 0.0):
+                return True
+            if isinstance(v, list):
+                return all(isinstance(e, dict)
+                           and e.get("record_ids") in (None, [])
+                           for e in v)
+            return False
+
+        def put(tid, rid, fields):
+            return call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records/{rid}",
+                        token, payload={"fields": fields})
+
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid, chg_tid, inv_tid = (by_name.get("個案主表"),
+                                     by_name.get("收費明細"), by_name.get("發票"))
+        if not (case_tid and chg_tid and inv_tid):
+            print(json.dumps({"stage": "repair-20261119", "step": "tables",
+                              "result": "REFUSED", "reason": "missing table",
+                              "tables": by_name}, ensure_ascii=False))
+            return 1
+        # (a) Delete the 11 duplicate charge rows under AML202611004.
+        cases = all_records(case_tid)
+        if cases is None:
+            return fail("a-delete-duplicates", "list cases failed")
+        ref_by_id = {r["record_id"]: r["fields"].get("Reference No.") for r in cases}
+        id_by_ref = {v: k for k, v in ref_by_id.items() if v}
+        dup_case_id = id_by_ref.get("AML202611004")
+        if not dup_case_id:
+            return fail("a-delete-duplicates", "case AML202611004 not found")
+        rows = all_records(chg_tid)
+        if rows is None:
+            return fail("a-delete-duplicates", "list charges failed")
+        dups = [r for r in rows if dup_case_id in link_ids(r["fields"].get("個案"))]
+        if len(dups) != 11:
+            return fail("a-delete-duplicates",
+                        "expected 11 duplicate rows under AML202611004",
+                        {"found": len(dups),
+                         "rows": [(r["record_id"], r["fields"].get("Charge 名稱"))
+                                  for r in dups]})
+        bad_names = [r["fields"].get("Charge 名稱") for r in dups
+                     if r["fields"].get("Charge 名稱") not in names040]
+        if bad_names:
+            return fail("a-delete-duplicates",
+                        "duplicate row name not in AMLA2606040 seed charges",
+                        {"names": bad_names})
+        plan_a = [{"record_id": r["record_id"],
+                   "charge": r["fields"].get("Charge 名稱"),
+                   "amount_live": r["fields"].get("AMOUNT (HKD)")} for r in dups]
+        if not do_run:
+            print(json.dumps({"stage": "repair-20261119-a", "dry_run": True,
+                              "would_delete": plan_a}, ensure_ascii=False))
+        else:
+            deleted = []
+            for item in plan_a:
+                res = call("DELETE", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/records/{item['record_id']}", token)
+                if res.get("code") != 0:
+                    print(json.dumps({"stage": "repair-20261119-a", "result": "FAILED",
+                                      "record_id": item["record_id"],
+                                      "code": res.get("code"), "msg": res.get("msg")},
+                                     ensure_ascii=False))
+                    return 1
+                deleted.append(item["record_id"])
+            print(json.dumps({"stage": "repair-20261119-a", "dry_run": False,
+                              "deleted": deleted}, ensure_ascii=False))
+        # (b) Restore the 36 original charge rows from the seeds.
+        dup_ids = {r["record_id"] for r in dups}
+        live_rows = all_records(chg_tid) if do_run else [r for r in rows if r["record_id"] not in dup_ids]
+        if live_rows is None:
+            return fail("b-restore-charges", "list charges failed")
+        if len(live_rows) != 36:
+            return fail("b-restore-charges",
+                        "expected 36 charge rows after removing duplicates",
+                        {"found": len(live_rows)})
+        plan_b, seen = [], set()
+        for r in live_rows:
+            f = r["fields"]
+            key = None
+            for cid in link_ids(f.get("個案")):
+                key = (ref_by_id.get(cid, cid), f.get("Charge 名稱"))
+                break
+            if key not in seed_charges:
+                return fail("b-restore-charges", "live charge row has no seed match",
+                            {"record_id": r["record_id"], "key": key})
+            if key in seen:
+                return fail("b-restore-charges",
+                            "duplicate (case, charge) key among live rows",
+                            {"key": key})
+            seen.add(key)
+            target = seed_charges[key]
+            live_vals = {k: f.get(k) for k in target}
+            plan_b.append({"record_id": r["record_id"], "ref": key[0],
+                           "charge": key[1], "live": live_vals, "target": target,
+                           "differs": live_vals != target})
+        if len(seen) != 36:
+            return fail("b-restore-charges", "seed keys missing from live rows",
+                        {"missing": sorted(set(seed_charges) - seen)})
+        if not do_run:
+            print(json.dumps({"stage": "repair-20261119-b", "dry_run": True,
+                              "rows": plan_b}, ensure_ascii=False))
+        else:
+            updated = []
+            for item in plan_b:
+                res = put(chg_tid, item["record_id"], item["target"])
+                if res.get("code") != 0:
+                    print(json.dumps({"stage": "repair-20261119-b", "result": "FAILED",
+                                      "record_id": item["record_id"], "charge": item["charge"],
+                                      "code": res.get("code"), "msg": res.get("msg")},
+                                     ensure_ascii=False))
+                    return 1
+                updated.append(item["record_id"])
+            print(json.dumps({"stage": "repair-20261119-b", "dry_run": False,
+                              "updated": updated}, ensure_ascii=False))
+        # (c) Restore the 6 invoice rows from the seeds (Invoice Date is
+        # already correct — never written).
+        invs = all_records(inv_tid)
+        if invs is None:
+            return fail("c-restore-invoices", "list invoices failed")
+        if len(invs) != 6:
+            return fail("c-restore-invoices", "expected 6 invoice rows",
+                        {"found": len(invs)})
+        plan_c, seen_inv = [], set()
+        for r in invs:
+            f = r["fields"]
+            no = f.get("Invoice No.")
+            if no not in seed_invoices:
+                return fail("c-restore-invoices", "live invoice has no seed match",
+                            {"record_id": r["record_id"], "invoice_no": no})
+            if no in seen_inv:
+                return fail("c-restore-invoices", "duplicate Invoice No.",
+                            {"invoice_no": no})
+            seen_inv.add(no)
+            target = seed_invoices[no]
+            live_vals = {k: f.get(k) for k in target}
+            plan_c.append({"record_id": r["record_id"], "invoice_no": no,
+                           "live": live_vals, "target": target,
+                           "differs": live_vals != target,
+                           "invoice_date_live": f.get("Invoice Date")})
+        if len(seen_inv) != 6:
+            return fail("c-restore-invoices", "seed invoices missing from live rows",
+                        {"missing": sorted(set(seed_invoices) - seen_inv)})
+        if not do_run:
+            print(json.dumps({"stage": "repair-20261119-c", "dry_run": True,
+                              "rows": plan_c}, ensure_ascii=False))
+        else:
+            updated = []
+            for item in plan_c:
+                res = put(inv_tid, item["record_id"], item["target"])
+                if res.get("code") != 0:
+                    print(json.dumps({"stage": "repair-20261119-c", "result": "FAILED",
+                                      "record_id": item["record_id"], "invoice_no": item["invoice_no"],
+                                      "code": res.get("code"), "msg": res.get("msg")},
+                                     ensure_ascii=False))
+                    return 1
+                updated.append(item["record_id"])
+            print(json.dumps({"stage": "repair-20261119-c", "dry_run": False,
+                              "updated": updated}, ensure_ascii=False))
+        # (d) Restore the 3 case statuses. LAST: flipping AMLA2606040 back
+        # to 已開票 re-triggers the Feishu Invoice Automation, which
+        # generates the 客人發票 PDF again and APPENDS it to the case's
+        # Invoice attachment field (the earlier PDF stays — it is not
+        # deleted). The other two flips (→ 已下單) generate no files.
+        plan_d = []
+        for ref, want in target_status.items():
+            rid = id_by_ref.get(ref)
+            if not rid:
+                return fail("d-restore-status", "case not found", {"ref": ref})
+            live_status = None
+            for r in cases:
+                if r["record_id"] == rid:
+                    live_status = r["fields"].get("狀態")
+                    break
+            plan_d.append({"record_id": rid, "ref": ref,
+                           "live_status": live_status, "target_status": want})
+        if not do_run:
+            print(json.dumps({"stage": "repair-20261119-d", "dry_run": True,
+                              "rows": plan_d,
+                              "warning": "AMLA2606040 → 已開票 will re-trigger the Feishu Invoice Automation: it generates the 客人發票 PDF again and APPENDS it to the case's Invoice attachment field; the earlier PDF is NOT deleted."},
+                             ensure_ascii=False))
+        else:
+            updated = []
+            for item in plan_d:
+                res = put(case_tid, item["record_id"], {"狀態": item["target_status"]})
+                if res.get("code") != 0:
+                    print(json.dumps({"stage": "repair-20261119-d", "result": "FAILED",
+                                      "record_id": item["record_id"], "ref": item["ref"],
+                                      "code": res.get("code"), "msg": res.get("msg")},
+                                     ensure_ascii=False))
+                    return 1
+                updated.append(item["ref"])
+            print(json.dumps({"stage": "repair-20261119-d", "dry_run": False,
+                              "updated": updated}, ensure_ascii=False))
+        # (e) Delete the empty case record — ONLY if Reference No. is
+        # blank and every field is empty (same is_empty check as
+        # delete-empty-case-record); refuses otherwise.
+        rec = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records/{empty_rid}", token)
+        fields = (rec.get("data", {}) or {}).get("record", {}).get("fields", {}) or {}
+        content = {k: v for k, v in fields.items() if not is_empty(v)}
+        if rec.get("code") != 0:
+            return fail("e-delete-empty-case", "read empty case record failed",
+                        {"code": rec.get("code"), "msg": rec.get("msg")})
+        if fields.get("Reference No.") not in (None, ""):
+            return fail("e-delete-empty-case", "Reference No. is no longer blank",
+                        {"reference_no": fields.get("Reference No.")})
+        if content:
+            return fail("e-delete-empty-case", "record is no longer empty",
+                        {"content_fields": content})
+        if not do_run:
+            print(json.dumps({"stage": "repair-20261119-e", "dry_run": True,
+                              "would_delete": empty_rid, "empty": True},
+                             ensure_ascii=False))
+        else:
+            res = call("DELETE", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records/{empty_rid}", token)
+            print(json.dumps({"stage": "repair-20261119-e", "dry_run": False,
+                              "result": "DELETED" if res.get("code") == 0 else "FAILED",
+                              "code": res.get("code"), "msg": res.get("msg")},
+                             ensure_ascii=False))
+            if res.get("code") != 0:
+                return 1
+        # Final check: re-read charges and confirm each case's AMOUNT (HKD)
+        # sum matches the seed expected total.
+        if do_run:
+            rows2 = all_records(chg_tid)
+            if rows2 is None:
+                return fail("verify", "list charges failed")
+            sums = {}
+            for r in rows2:
+                for cid in link_ids(r["fields"].get("個案")):
+                    ref = ref_by_id.get(cid, cid)
+                    sums[ref] = sums.get(ref, 0.0) + float(r["fields"].get("AMOUNT (HKD)") or 0)
+            bad = {ref: round(sums.get(ref, 0.0), 2) for ref in expected_totals
+                   if round(sums.get(ref, 0.0), 2) != expected_totals[ref]}
+            print(json.dumps({"stage": "repair-20261119-verify",
+                              "charge_sums_hkd": {k: round(v, 2) for k, v in sorted(sums.items())},
+                              "expected": expected_totals, "mismatched": bad},
+                             ensure_ascii=False))
+            if bad:
+                return 1
+        else:
+            print(json.dumps({"stage": "repair-20261119-verify", "dry_run": True,
+                              "expected_charge_sums_hkd": expected_totals},
+                             ensure_ascii=False))
+        print(json.dumps({"stage": "repair-20261119-done", "dry_run": not do_run},
+                         ensure_ascii=False))
+        return 0
 
     if cmd == "update-record":
         # One-record field update: update-record <table_id> <record_id>
