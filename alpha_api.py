@@ -2006,6 +2006,44 @@ def main():
                          ensure_ascii=False))
         return 0
 
+    if cmd == "add-invoice-attach-fields":
+        # 2026-11-20 (Yan): the 發票 table gains two Attachment fields —
+        # 「客人付款紀錄」 (customer payment proof, e.g. bank slip) and
+        # 「供應商發票」 (the supplier invoice file itself). Idempotent
+        # by field name. (The Lookup field Yan also asked for cannot be
+        # created via API — code 99992402, UI only — not attempted here.)
+        tid = "tblqo9FDkc2jD3tP"  # 發票
+        want = ["客人付款紀錄", "供應商發票"]
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "add-invoice-attach-fields", "step": "list-fields",
+                              "code": res.get("code"), "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        items = res.get("data", {}).get("items", [])
+        existing = {f["field_name"] for f in items}
+        print(json.dumps({"stage": "add-invoice-attach-fields-start",
+                          "existing_fields": [f["field_name"] for f in items]}, ensure_ascii=False))
+        created = []
+        for name in want:
+            if name in existing:
+                print(json.dumps({"stage": "field-exists-skip", "field": name}, ensure_ascii=False))
+                continue
+            r = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                     token, payload={"field_name": name, "type": 17})
+            print(json.dumps({"stage": "create-field", "field": name, "type": 17,
+                              "code": r.get("code"), "msg": r.get("msg"),
+                              "field_id": (r.get("data", {}) or {}).get("field_id")}, ensure_ascii=False))
+            if r.get("code") != 0:
+                return 1
+            created.append(name)
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        items = res.get("data", {}).get("items", []) if res.get("code") == 0 else []
+        names = [f["field_name"] for f in items]
+        ok = all(n in names for n in want)
+        print(json.dumps({"stage": "add-invoice-attach-fields-done", "created": created,
+                          "verified": ok, "fields": names}, ensure_ascii=False))
+        return 0 if ok else 1
+
     if cmd == "update-record":
         # One-record field update: update-record <table_id> <record_id>
         # <fields-json>. Used for small fixes (e.g. flipping a booking
