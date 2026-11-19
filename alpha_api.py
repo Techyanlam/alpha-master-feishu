@@ -2077,7 +2077,7 @@ def main():
                 if r.get("code") != 0:
                     return None, r
                 d = r.get("data", {})
-                out.extend(d.get("items", []))
+                out.extend(d.get("items") or [])
                 if d.get("has_more") and d.get("page_token"):
                     page = d["page_token"]
                 else:
