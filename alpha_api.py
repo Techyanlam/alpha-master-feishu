@@ -1924,7 +1924,8 @@ def main():
                           "field_id": amt_fid, "field_name": amt.get("field_name"),
                           "current_formula": cur_expr},
                          ensure_ascii=False))
-        if cur_expr == new_expr:
+        # Feishu stores the formula with IF uppercase; compare case-insensitively.
+        if (cur_expr or "").upper() == new_expr.upper():
             print(json.dumps({"stage": "fix-amount-formula", "result": "ALREADY_FIXED",
                               "field_id": amt_fid}, ensure_ascii=False))
             return 0
@@ -1983,7 +1984,7 @@ def main():
         print(json.dumps({"stage": "fix-amount-formula-verify-field",
                           "dry_run": False, "formula_expression": cur2},
                          ensure_ascii=False))
-        if cur2 != new_expr:
+        if (cur2 or "").upper() != new_expr.upper():  # Feishu stores IF uppercase
             return fail("verify-field", "formula did not update",
                         {"expected": new_expr, "found": cur2})
         # Formula recalc takes ~30s; wait, then re-read and verify sums.
