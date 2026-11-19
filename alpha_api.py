@@ -1355,7 +1355,7 @@ def main():
         candidates, created, skipped, failed = [], [], [], []
         for b in bookings:
             f = b.get("fields") or {}
-            status = sel_name(f.get("認讀狀態"))
+            status = sel_name(f.get("Status") or f.get("認讀狀態"))
             if status not in ("開案", "opto3Yy36c"):
                 continue
             if link_ids(f.get("個案")):
@@ -1367,7 +1367,9 @@ def main():
             # The Reference No. comes from the booking row's Numbering
             # field — never generated here. Blank means the row has no
             # number yet: skip it rather than inventing one.
-            ref = f.get("Reference No.") or f.get("已開個案 Reference No.")
+            # B1: 落單表鍵名係 "Reference no." (小寫 no.)，先讀小寫，
+            # 再 fallback 大寫 "Reference No."。
+            ref = f.get("Reference no.") or f.get("Reference No.") or f.get("已開個案 Reference No.")
             if not ref or not isinstance(ref, str):
                 skipped.append({"booking": b["record_id"], "reason": "NO-REF"})
                 continue
