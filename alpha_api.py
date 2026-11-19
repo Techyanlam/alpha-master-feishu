@@ -74,6 +74,21 @@ Commands:
                                statuses, delete the empty case record
                                reczz28abUPqE7OJ. Dry-run unless arg is
                                exactly "run".
+  fix-amount-formula [run]   Replace the AMOUNT (HKD) Formula on 收費明細
+                               (fldAw7AN1L) with an FX-aware one that
+                               always uses the row's own QTY: CNY x1.153,
+                               USD x7.85, else x1. The current formula
+                               has no FX conversion and uses the case's
+                               gross Weight for KG rows, so totals come
+                               out in the original currency (and writes
+                               to a Formula field are silently ignored,
+                               which is why repair-20261119 run #52
+                               could not restore the amounts). Dry-run
+                               unless arg is exactly "run"; dry-run
+                               predicts per-case sums from live
+                               PRICE/QTY/CURR and refuses on mismatch;
+                               run updates the field, waits 30s for
+                               recalc, then verifies live sums.
   update-record <table_id> <record_id> <fields-json>
                                Update one record's fields (PUT). One record
                                at a time, explicit ids only.
@@ -1746,6 +1761,245 @@ def main():
                               "expected_charge_sums_hkd": expected_totals},
                              ensure_ascii=False))
         print(json.dumps({"stage": "repair-20261119-done", "dry_run": not do_run},
+                         ensure_ascii=False))
+        return 0
+
+    if cmd == "fix-amount-formula":
+        # Fix the AMOUNT (HKD) Formula on 收費明細 (found 2026-11-19,
+        # runs #53-55): field fldAw7AN1L is a Formula (type 20), not a
+        # Number field, so writes to it are silently ignored (the API
+        # returns code 0 but the value does not change) — that is why
+        # repair-20261119 run #52 could not restore the HKD amounts.
+        # The current formula is PRICE x Weight for KG rows and
+        # PRICE x QTY otherwise, with NO FX conversion, and it uses
+        # the case's gross Weight instead of the row's own QTY, so
+        # AML2610063 DELIVERY computes 0.70x653=457.1 (not 819) and
+        # 2020-CX086 AIRFREIGHT 55x492=27060 (not 32890).
+        # This command replaces the formula with an FX-aware one that
+        # always uses the row's own QTY: CNY x1.153, USD x7.85, else x1
+        # (rates are the client's own, from the export-air sample file).
+        # Dry-run unless arg is exactly "run". Fail-stop: any refused
+        # gate or failed write returns 1 at once. Never touches any
+        # other field or table; does not touch the 發票 table.
+        do_run = len(sys.argv) > 3 and sys.argv[3] == "run"
+        chg_tid_expect = "tbl7PZckSGYrAixj"
+        amt_fid = "fldAw7AN1L"
+        new_expr = ("if(bitable::$table[tbl7PZckSGYrAixj].$field[fldpGOgRlb]=\"CNY\","
+                    "bitable::$table[tbl7PZckSGYrAixj].$field[fldv6QZnhi]*"
+                    "bitable::$table[tbl7PZckSGYrAixj].$field[fldjoUuyPx]*1.153,"
+                    "if(bitable::$table[tbl7PZckSGYrAixj].$field[fldpGOgRlb]=\"USD\","
+                    "bitable::$table[tbl7PZckSGYrAixj].$field[fldv6QZnhi]*"
+                    "bitable::$table[tbl7PZckSGYrAixj].$field[fldjoUuyPx]*7.85,"
+                    "bitable::$table[tbl7PZckSGYrAixj].$field[fldv6QZnhi]*"
+                    "bitable::$table[tbl7PZckSGYrAixj].$field[fldjoUuyPx]))")
+        expected_totals = {"AMLA2606040": 51109.80, "AMLS2608022": 15874.76,
+                           "AML2610063": 2079.04, "AML2609082": 4243.00,
+                           "AML2608109": 201400.00, "2020-CX086": 32890}
+        print(json.dumps({"stage": "fix-amount-formula-start", "dry_run": not do_run,
+                          "field_id": amt_fid,
+                          "target": "FX-aware formula, always QTY (CNY x1.153, USD x7.85, else x1)"},
+                         ensure_ascii=False))
+
+        def fail(step, reason, extra=None):
+            out = {"stage": "fix-amount-formula", "step": step,
+                   "result": "REFUSED", "reason": reason}
+            if extra:
+                out.update(extra)
+            print(json.dumps(out, ensure_ascii=False))
+            return 1
+
+        def all_records(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}"
+                       f"/records?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    return None
+                d = res.get("data", {})
+                out.extend(d.get("items", []))
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        def list_fields(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields"
+                       f"?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    return None
+                d = res.get("data", {})
+                out.extend(d.get("items", []))
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        def link_ids(v):
+            # Link fields come back as a single-element list holding a
+            # dict: [{"record_ids": [...], "table_id": ..., "text": ...,
+            # "text_arr": [...], "type": "text"}]; an empty link has
+            # record_ids null. (Same shape as repair-20261119.)
+            out = []
+            items = v if isinstance(v, list) else [v]
+            for x in items:
+                if isinstance(x, str):
+                    out.append(x)
+                elif isinstance(x, dict):
+                    ids = x.get("record_ids")
+                    if isinstance(ids, list):
+                        out.extend(ids)
+                    elif x.get("record_id") or x.get("id"):
+                        out.append(x.get("record_id") or x.get("id"))
+            return [i for i in out if i]
+
+        def sel_name(v):
+            # SingleSelect values come back as plain name strings in
+            # list-records (run #55); also accept the {"name": ...} shape.
+            if isinstance(v, str):
+                return v
+            if isinstance(v, dict):
+                return v.get("name") or v.get("text") or ""
+            return ""
+
+        def to_num(v):
+            # Number fields come back as strings in list-records
+            # ("12", "1336"); formula results come back as JSON numbers.
+            if v is None or v == "":
+                return 0.0
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def predict_amount(f):
+            price = to_num(f.get("PRICE"))
+            qty = to_num(f.get("QTY"))
+            curr = sel_name(f.get("CURR"))
+            rate = 1.153 if curr == "CNY" else 7.85 if curr == "USD" else 1.0
+            return price * qty * rate
+
+        def sums_by_case(rows, ref_by_id, use_formula_value):
+            sums = {}
+            for r in rows:
+                f = r["fields"]
+                val = (to_num(f.get("AMOUNT (HKD)")) if use_formula_value
+                       else predict_amount(f))
+                for cid in link_ids(f.get("個案")):
+                    ref = ref_by_id.get(cid, cid)
+                    sums[ref] = sums.get(ref, 0.0) + val
+            return sums
+
+        def check_sums(sums):
+            return {ref: round(sums.get(ref, 0.0), 2) for ref in expected_totals
+                    if abs(round(sums.get(ref, 0.0), 2) - expected_totals[ref]) > 0.02}
+
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid, chg_tid = by_name.get("個案主表"), by_name.get("收費明細")
+        if not (case_tid and chg_tid):
+            return fail("tables", "missing table", {"tables": by_name})
+        if chg_tid != chg_tid_expect:
+            return fail("tables", "charges table id changed",
+                        {"expected": chg_tid_expect, "found": chg_tid})
+        # (a) Read the field definition and print the current formula.
+        fields = list_fields(chg_tid)
+        if fields is None:
+            return fail("read-field", "list fields failed")
+        amt = next((f for f in fields if f.get("field_id") == amt_fid), None)
+        if amt is None:
+            return fail("read-field", "AMOUNT field not found",
+                        {"field_id": amt_fid})
+        if amt.get("type") != 20:
+            return fail("read-field", "AMOUNT is no longer a Formula field",
+                        {"type": amt.get("type")})
+        cur_expr = (amt.get("property") or {}).get("formula_expression")
+        print(json.dumps({"stage": "fix-amount-formula-a", "dry_run": not do_run,
+                          "field_id": amt_fid, "field_name": amt.get("field_name"),
+                          "current_formula": cur_expr},
+                         ensure_ascii=False))
+        if cur_expr == new_expr:
+            print(json.dumps({"stage": "fix-amount-formula", "result": "ALREADY_FIXED",
+                              "field_id": amt_fid}, ensure_ascii=False))
+            return 0
+        cases = all_records(case_tid)
+        if cases is None:
+            return fail("read-cases", "list cases failed")
+        ref_by_id = {r["record_id"]: r["fields"].get("Reference No.") for r in cases}
+        rows = all_records(chg_tid)
+        if rows is None:
+            return fail("read-charges", "list charges failed")
+        if not do_run:
+            # (b) Dry-run: predict per-case sums from live PRICE/QTY/CURR
+            # using the new formula's logic, and refuse on mismatch.
+            pred = sums_by_case(rows, ref_by_id, use_formula_value=False)
+            bad = check_sums(pred)
+            print(json.dumps({"stage": "fix-amount-formula-b", "dry_run": True,
+                              "rows": len(rows),
+                              "new_formula": new_expr,
+                              "predicted_sums_hkd": {k: round(v, 2) for k, v in sorted(pred.items())},
+                              "expected": expected_totals, "mismatched": bad},
+                             ensure_ascii=False))
+            if bad:
+                return fail("predict", "predicted sums do not match expected totals",
+                            {"mismatched": bad})
+            print(json.dumps({"stage": "fix-amount-formula-done", "dry_run": True},
+                             ensure_ascii=False))
+            return 0
+        # (c) Run: update the field property via the update-field API
+        # (PUT .../tables/{table_id}/fields/{field_id}); the payload
+        # shape follows the Feishu docs and mirrors create-field in
+        # this file. If the API refuses to change formula_expression,
+        # report the error truthfully and stop — do not guess another
+        # format.
+        new_prop = {"formatter": "", "formula_expression": new_expr,
+                    "type": {"data_type": 2, "ui_property": {"formatter": "0"},
+                             "ui_type": "Number"}}
+        res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/fields/{amt_fid}",
+                   token, payload={"field_name": "AMOUNT (HKD)", "type": 20,
+                                   "property": new_prop})
+        print(json.dumps({"stage": "fix-amount-formula-c", "dry_run": False,
+                          "field_id": amt_fid, "code": res.get("code"),
+                          "msg": res.get("msg")}, ensure_ascii=False))
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "fix-amount-formula", "step": "update-field",
+                              "result": "FAILED",
+                              "reason": "update-field API rejected the formula change",
+                              "code": res.get("code"), "msg": res.get("msg")},
+                             ensure_ascii=False))
+            return 1
+        # Re-read the field definition to verify the new formula landed.
+        fields2 = list_fields(chg_tid)
+        if fields2 is None:
+            return fail("verify-field", "list fields failed after update")
+        amt2 = next((f for f in fields2 if f.get("field_id") == amt_fid), None)
+        cur2 = ((amt2 or {}).get("property") or {}).get("formula_expression")
+        print(json.dumps({"stage": "fix-amount-formula-verify-field",
+                          "dry_run": False, "formula_expression": cur2},
+                         ensure_ascii=False))
+        if cur2 != new_expr:
+            return fail("verify-field", "formula did not update",
+                        {"expected": new_expr, "found": cur2})
+        # Formula recalc takes ~30s; wait, then re-read and verify sums.
+        time.sleep(30)
+        rows2 = all_records(chg_tid)
+        if rows2 is None:
+            return fail("verify", "list charges failed after recalc")
+        sums = sums_by_case(rows2, ref_by_id, use_formula_value=True)
+        bad = check_sums(sums)
+        print(json.dumps({"stage": "fix-amount-formula-verify",
+                          "charge_sums_hkd": {k: round(v, 2) for k, v in sorted(sums.items())},
+                          "expected": expected_totals, "mismatched": bad},
+                         ensure_ascii=False))
+        if bad:
+            return 1
+        print(json.dumps({"stage": "fix-amount-formula-done", "dry_run": False},
                          ensure_ascii=False))
         return 0
 
