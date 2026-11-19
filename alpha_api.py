@@ -2044,6 +2044,111 @@ def main():
                           "verified": ok, "fields": names}, ensure_ascii=False))
         return 0 if ok else 1
 
+    if cmd == "clear-all":
+        # 2026-11-20 (Yan: 「清空交客人」): wipe ALL transactional records
+        # so the Base hands over to the client clean. Safe order:
+        #   1. 客人落單認讀 — first flip any 開案 row's Status back to
+        #      待核對 (deleting a linked case while its booking row is
+        #      still 開案 makes the 「落單認讀 → 自動開案」 automation
+        #      re-create the case), then delete all booking rows.
+        #   2. 個案主表 — delete all cases (also removes the Worker
+        #      invoice-sync cron's source: no case, no auto invoice).
+        #   3. 收費明細 → 4. 發票 → 5. 文件 — delete all rows.
+        # KEPT (master data / system setup): 供應商, 客戶, 標準費率,
+        # plus all fields, views, automations and templates.
+        # Usage: clear-all [dry] — default is a dry run (counts only);
+        # clear-all run executes, then re-reads every cleared table.
+        mode = sys.argv[3] if len(sys.argv) > 3 else "dry"
+        T_BOOK = "tbldUbIF5jqTGzOM"   # 客人落單認讀
+        T_CASE = "tbl1VaAfjwnbvk8j"   # 個案主表
+        T_CHG = "tbl7PZckSGYrAixj"    # 收費明細
+        T_INV = "tblqo9FDkc2jD3tP"    # 發票
+        T_DOC = "tbl6Qr8jux6kxPiR"    # 文件
+        KEPT = [("tblm6XB7fjbDaB7X", "供應商"), ("tblR42JpV1DVmhzo", "客戶"),
+                ("tbl6m5IoZc6S19ol", "標準費率")]
+
+        def all_records(tid):
+            out, page = [], None
+            while True:
+                u = f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records?page_size=100"
+                if page:
+                    u += f"&page_token={page}"
+                r = call("GET", u, token)
+                if r.get("code") != 0:
+                    return None, r
+                d = r.get("data", {})
+                out.extend(d.get("items", []))
+                if d.get("has_more") and d.get("page_token"):
+                    page = d["page_token"]
+                else:
+                    return out, r
+
+        def sel(v):
+            if isinstance(v, str):
+                return v
+            if isinstance(v, dict):
+                return v.get("text") or v.get("value") or ""
+            return ""
+
+        def batch_delete(tid, ids):
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                r = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records/batch_delete",
+                         token, payload={"records": chunk})
+                if r.get("code") != 0:
+                    return r
+            return {"code": 0}
+
+        plan = [(T_BOOK, "客人落單認讀"), (T_CASE, "個案主表"), (T_CHG, "收費明細"),
+                (T_INV, "發票"), (T_DOC, "文件")]
+        snapshot = {}
+        for tid, name in plan + KEPT:
+            rows, r = all_records(tid)
+            if rows is None:
+                print(json.dumps({"stage": "clear-all", "step": "list", "table": name,
+                                  "code": r.get("code"), "msg": r.get("msg")}, ensure_ascii=False))
+                return 1
+            snapshot[tid] = rows
+            print(json.dumps({"stage": "clear-all-count", "table": name,
+                              "count": len(rows)}, ensure_ascii=False))
+        book_open = [x["record_id"] for x in snapshot[T_BOOK]
+                     if sel(x.get("fields", {}).get("Status")) == "開案"]
+        print(json.dumps({"stage": "clear-all-plan", "mode": mode,
+                          "booking_rows_open_case": book_open}, ensure_ascii=False))
+        if mode != "run":
+            print(json.dumps({"stage": "clear-all-dry-done"}, ensure_ascii=False))
+            return 0
+        # 1a. Flip open booking rows back to 待核對 BEFORE any case delete.
+        for rid in book_open:
+            r = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{T_BOOK}/records/{rid}",
+                     token, payload={"fields": {"Status": "待核對"}})
+            print(json.dumps({"stage": "clear-all-flip-booking", "record_id": rid,
+                              "code": r.get("code"), "msg": r.get("msg")}, ensure_ascii=False))
+            if r.get("code") != 0:
+                return 1
+        # 1b–5. Delete in safe order.
+        for tid, name in plan:
+            ids = [x["record_id"] for x in snapshot[tid]]
+            if ids:
+                r = batch_delete(tid, ids)
+                print(json.dumps({"stage": "clear-all-delete", "table": name,
+                                  "deleted": len(ids) if r.get("code") == 0 else 0,
+                                  "code": r.get("code"), "msg": r.get("msg")}, ensure_ascii=False))
+                if r.get("code") != 0:
+                    return 1
+            else:
+                print(json.dumps({"stage": "clear-all-delete", "table": name,
+                                  "deleted": 0, "code": 0}, ensure_ascii=False))
+        ok = True
+        for tid, name in plan:
+            rows, r = all_records(tid)
+            n = len(rows) if rows is not None else -1
+            print(json.dumps({"stage": "clear-all-verify", "table": name,
+                              "remaining": n}, ensure_ascii=False))
+            ok = ok and n == 0
+        print(json.dumps({"stage": "clear-all-done", "verified_empty": ok}, ensure_ascii=False))
+        return 0 if ok else 1
+
     if cmd == "update-record":
         # One-record field update: update-record <table_id> <record_id>
         # <fields-json>. Used for small fixes (e.g. flipping a booking
