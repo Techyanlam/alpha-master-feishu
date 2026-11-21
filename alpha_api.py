@@ -84,6 +84,8 @@ Commands:
                                the AMOUNT formula to per-row rate override
                                (rate>0 wins, else CNY 1.153 / USD 7.85 / x1).
                                Verifies every charge AMOUNT is unchanged.
+  add-invoice-creator-fields Add 建立人 (CreatedBy) + 建立時間 (CreatedTime)
+                               system fields to the 發票 table (idempotent).
                                (fldAw7AN1L) with an FX-aware one that
                                always uses the row's own QTY: CNY x1.153,
                                USD x7.85, else x1. The current formula
@@ -2330,6 +2332,55 @@ def main():
         print(json.dumps({"stage": "fx-overhaul-done", "dry_run": False,
                           "rate_field_id": rate_fid},
                          ensure_ascii=False))
+        return 0
+
+    if cmd == "add-invoice-creator-fields":
+        # 2026-11-21 (Yan, meeting follow-up item 1): the 發票 table gains
+        # the system fields 建立人 (CreatedBy, type 1003) and 建立時間
+        # (CreatedTime, type 1001) so each invoice shows who created it.
+        # Idempotent by field name. Prints the first rows' creator values
+        # afterwards for verification. Note: rows created by the Worker
+        # (auto-registration) will show the app as creator — expected.
+        tid = "tblqo9FDkc2jD3tP"  # 發票
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "add-invoice-creator-fields", "step": "list-fields",
+                              "code": res.get("code"), "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        items = res.get("data", {}).get("items", [])
+        existing = {f["field_name"] for f in items}
+        print(json.dumps({"stage": "add-invoice-creator-fields-start",
+                          "existing_count": len(existing),
+                          "fields": sorted(existing)}, ensure_ascii=False))
+        want = [("建立人", 1003, None),
+                ("建立時間", 1001, {"date_formatter": "yyyy/MM/dd HH:mm"})]
+        for name, ftype, prop in want:
+            if name in existing:
+                print(json.dumps({"stage": "create-field", "field": name,
+                                  "result": "EXISTS"}, ensure_ascii=False))
+                continue
+            payload = {"field_name": name, "type": ftype}
+            if prop:
+                payload["property"] = prop
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                       token, payload=payload)
+            print(json.dumps({"stage": "create-field", "field": name, "type": ftype,
+                              "code": res.get("code"), "msg": res.get("msg"),
+                              "field_id": ((res.get("data") or {}).get("field") or {}).get("field_id")},
+                             ensure_ascii=False))
+            if res.get("code") != 0:
+                return 1
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records?page_size=20", token)
+        rows = (res.get("data", {}) or {}).get("items") or []
+        sample = []
+        for r in rows[:5]:
+            f = r.get("fields", {}) or {}
+            sample.append({"record_id": r.get("record_id"),
+                           "no": f.get("Invoice No."),
+                           "creator": f.get("建立人"),
+                           "created": f.get("建立時間")})
+        print(json.dumps({"stage": "add-invoice-creator-fields-verify",
+                          "rows": len(rows), "sample": sample}, ensure_ascii=False))
         return 0
 
     if cmd == "add-invoice-attach-fields":
