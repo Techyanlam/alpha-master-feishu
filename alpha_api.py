@@ -1199,6 +1199,32 @@ def main():
                          ensure_ascii=False))
         return 0 if res.get("code") == 0 else 1
 
+    if cmd == "delete-test-customer":
+        # Delete ONLY the TEST customer row reczz28cCXYF7Tj4 (created by the
+        # 2026-11-21 customer-picker API test). SAFETY: re-reads the record
+        # first and deletes ONLY if 公司名稱 still contains "TEST";
+        # refuses otherwise. Part of the 2026-11-22 test-data cleanup
+        # (clear-all deliberately keeps the 客戶 table).
+        cust_tid = "tblR42JpV1DVmhzo"
+        rid = "reczz28cCXYF7Tj4"
+        rec = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{cust_tid}/records/{rid}", token)
+        fields = (rec.get("data", {}) or {}).get("record", {}).get("fields", {}) or {}
+        name = fields.get("公司名稱") or ""
+        print(json.dumps({"stage": "delete-test-customer", "record_id": rid,
+                          "code": rec.get("code"), "name": name},
+                         ensure_ascii=False))
+        if rec.get("code") != 0:
+            return 1
+        if "TEST" not in str(name):
+            print(json.dumps({"stage": "delete-test-customer",
+                              "result": "REFUSED-NOT-TEST"}, ensure_ascii=False))
+            return 1
+        res = call("DELETE", f"{BASE}/bitable/v1/apps/{app_token}/tables/{cust_tid}/records/{rid}", token)
+        print(json.dumps({"stage": "delete-test-customer", "result": "DELETED",
+                          "code": res.get("code"), "msg": res.get("msg")},
+                         ensure_ascii=False))
+        return 0 if res.get("code") == 0 else 1
+
     if cmd == "create-field":
         table_id = sys.argv[3]
         spec = json.loads(sys.argv[4])
