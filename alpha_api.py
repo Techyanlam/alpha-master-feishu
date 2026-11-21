@@ -78,6 +78,12 @@ Commands:
                                reczz28abUPqE7OJ. Dry-run unless arg is
                                exactly "run".
   fix-amount-formula [run]   Replace the AMOUNT (HKD) Formula on 收費明細
+  fx-overhaul [dry|run]      FX phase (2026-11-21, Yan approved): build the
+                               Exchange rate table (貨幣/匯率 + USD/CNY seeds),
+                               add a 匯率 Number field to 收費明細 and switch
+                               the AMOUNT formula to per-row rate override
+                               (rate>0 wins, else CNY 1.153 / USD 7.85 / x1).
+                               Verifies every charge AMOUNT is unchanged.
                                (fldAw7AN1L) with an FX-aware one that
                                always uses the row's own QTY: CNY x1.153,
                                USD x7.85, else x1. The current formula
@@ -2109,6 +2115,220 @@ def main():
         if bad:
             return 1
         print(json.dumps({"stage": "fix-amount-formula-done", "dry_run": False},
+                         ensure_ascii=False))
+        return 0
+
+    if cmd == "fx-overhaul":
+        # FX phase (2026-11-21; Yan approved the design 2026-11-21 "2 yes",
+        # Exchange rate table "3 留" = keep and use it):
+        #  A. Exchange rate table (tbllAWZPFN9VFBvp, an empty shell with one
+        #     default "Text" primary + 5 blank rows): rename the primary to
+        #     貨幣, add 匯率 (Number), seed USD 7.85 / CNY 1.153 (the client's
+        #     printed rates). Idempotent.
+        #  B. 收費明細: add 匯率 (Number, per-row override; empty = default),
+        #     then replace the AMOUNT formula so a row with 匯率>0 computes
+        #     PRICE*QTY*匯率 and every other row keeps today's result.
+        # Safety: dry-run unless arg is exactly "run". Before the formula
+        # change, snapshot every charge row's AMOUNT; after the change wait
+        # 30s and re-read — ANY row whose AMOUNT moved (beyond 0.005) is
+        # reported as a failure (rollback path: run fix-amount-formula).
+        do_run = len(sys.argv) > 3 and sys.argv[3] == "run"
+        fx_tid_expect = "tbllAWZPFN9VFBvp"
+        chg_tid_expect = "tbl7PZckSGYrAixj"
+        amt_fid = "fldAw7AN1L"
+        print(json.dumps({"stage": "fx-overhaul-start", "dry_run": not do_run},
+                         ensure_ascii=False))
+
+        def fail(step, reason, extra=None):
+            out = {"stage": "fx-overhaul", "step": step,
+                   "result": "REFUSED", "reason": reason}
+            if extra:
+                out.update(extra)
+            print(json.dumps(out, ensure_ascii=False))
+            return 1
+
+        def all_records(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}"
+                       f"/records?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    return None
+                d = res.get("data", {})
+                out.extend(d.get("items") or [])
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        def list_fields(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields"
+                       f"?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    return None
+                d = res.get("data", {})
+                out.extend(d.get("items") or [])
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        def to_num(v):
+            if v is None or v == "":
+                return 0.0
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        fx_tid = by_name.get("Exchange rate")
+        chg_tid = by_name.get("收費明細")
+        if not fx_tid or fx_tid != fx_tid_expect:
+            return fail("tables", "Exchange rate table id mismatch",
+                        {"expected": fx_tid_expect, "found": fx_tid})
+        if not chg_tid or chg_tid != chg_tid_expect:
+            return fail("tables", "charges table id mismatch",
+                        {"expected": chg_tid_expect, "found": chg_tid})
+
+        # ---- A. Exchange rate table structure + seeds ----
+        fx_fields = list_fields(fx_tid)
+        if fx_fields is None:
+            return fail("fx-fields", "list fields failed")
+        fx_names = {f["field_name"]: f for f in fx_fields}
+        print(json.dumps({"stage": "fx-overhaul-a", "dry_run": not do_run,
+                          "fx_fields": sorted(fx_names.keys())},
+                         ensure_ascii=False))
+        if do_run:
+            primary = next((f for f in fx_fields if f.get("is_primary")), None)
+            if primary and primary["field_name"] != "貨幣":
+                res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{fx_tid}/fields/{primary['field_id']}",
+                           token, payload={"field_name": "貨幣", "type": 1})
+                print(json.dumps({"stage": "fx-overhaul-a", "rename_primary": primary["field_name"],
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                if res.get("code") != 0:
+                    return fail("fx-rename", "rename primary failed",
+                                {"code": res.get("code"), "msg": res.get("msg")})
+            if "匯率" not in fx_names:
+                res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{fx_tid}/fields",
+                           token, payload={"field_name": "匯率", "type": 2})
+                print(json.dumps({"stage": "fx-overhaul-a", "add_field": "匯率",
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                if res.get("code") != 0:
+                    return fail("fx-add-field", "add 匯率 failed",
+                                {"code": res.get("code"), "msg": res.get("msg")})
+            fx_rows = all_records(fx_tid)
+            if fx_rows is None:
+                return fail("fx-rows", "list records failed")
+            have_curr = {(r.get("fields", {}) or {}).get("貨幣")
+                         for r in fx_rows}
+            for curr, rate in (("USD", 7.85), ("CNY", 1.153)):
+                if curr in have_curr:
+                    continue
+                res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{fx_tid}/records",
+                           token, payload={"fields": {"貨幣": curr, "匯率": rate}})
+                print(json.dumps({"stage": "fx-overhaul-a", "seed": curr, "rate": rate,
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                if res.get("code") != 0:
+                    return fail("fx-seed", "seed failed",
+                                {"code": res.get("code"), "msg": res.get("msg")})
+
+        # ---- B. 收費明細 匯率 field + AMOUNT formula ----
+        chg_fields = list_fields(chg_tid)
+        if chg_fields is None:
+            return fail("chg-fields", "list fields failed")
+        rate_f = next((f for f in chg_fields if f["field_name"] == "匯率"), None)
+        amt_f = next((f for f in chg_fields if f.get("field_id") == amt_fid), None)
+        if amt_f is None or amt_f.get("type") != 20:
+            return fail("chg-fields", "AMOUNT formula field not found / not Formula")
+        cur_expr = (amt_f.get("property") or {}).get("formula_expression")
+        print(json.dumps({"stage": "fx-overhaul-b", "dry_run": not do_run,
+                          "rate_field_id": (rate_f or {}).get("field_id"),
+                          "current_formula": cur_expr},
+                         ensure_ascii=False))
+        rows_before = all_records(chg_tid)
+        if rows_before is None:
+            return fail("chg-rows", "list charges failed")
+        amt_before = {r["record_id"]: to_num((r.get("fields") or {}).get("AMOUNT (HKD)"))
+                      for r in rows_before}
+        print(json.dumps({"stage": "fx-overhaul-b", "charge_rows": len(amt_before),
+                          "amount_sum": round(sum(amt_before.values()), 2)},
+                         ensure_ascii=False))
+        if not do_run:
+            print(json.dumps({"stage": "fx-overhaul-done", "dry_run": True,
+                              "note": "no writes made; run with arg 'run' to apply"},
+                             ensure_ascii=False))
+            return 0
+        if rate_f is None:
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/fields",
+                       token, payload={"field_name": "匯率", "type": 2})
+            print(json.dumps({"stage": "fx-overhaul-b", "add_field": "匯率",
+                              "code": res.get("code"), "msg": res.get("msg")},
+                             ensure_ascii=False))
+            if res.get("code") != 0:
+                return fail("chg-add-field", "add 匯率 failed",
+                            {"code": res.get("code"), "msg": res.get("msg")})
+            rate_fid = (res.get("data", {}) or {}).get("field", {}).get("field_id")
+            if not rate_fid:
+                return fail("chg-add-field", "no field_id in create response")
+        else:
+            rate_fid = rate_f["field_id"]
+        T = chg_tid_expect
+        R = f"bitable::$table[{T}].$field[{rate_fid}]"
+        P = f"bitable::$table[{T}].$field[fldv6QZnhi]"
+        Q = f"bitable::$table[{T}].$field[fldjoUuyPx]"
+        C = f"bitable::$table[{T}].$field[fldpGOgRlb]"
+        new_expr = (f"if({R}>0,{P}*{Q}*{R},"
+                    f"if({C}=\"CNY\",{P}*{Q}*1.153,"
+                    f"if({C}=\"USD\",{P}*{Q}*7.85,{P}*{Q})))")
+        if (cur_expr or "").upper() == new_expr.upper():
+            print(json.dumps({"stage": "fx-overhaul-b", "result": "ALREADY_SET"},
+                             ensure_ascii=False))
+        else:
+            new_prop = {"formatter": "", "formula_expression": new_expr,
+                        "type": {"data_type": 2, "ui_property": {"formatter": "0"},
+                                 "ui_type": "Number"}}
+            res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{chg_tid}/fields/{amt_fid}",
+                       token, payload={"field_name": "AMOUNT (HKD)", "type": 20,
+                                       "property": new_prop})
+            print(json.dumps({"stage": "fx-overhaul-b", "update_formula": True,
+                              "code": res.get("code"), "msg": res.get("msg"),
+                              "new_formula": new_expr},
+                             ensure_ascii=False))
+            if res.get("code") != 0:
+                return fail("chg-formula", "update-field rejected the formula",
+                            {"code": res.get("code"), "msg": res.get("msg")})
+            time.sleep(30)
+            rows_after = all_records(chg_tid)
+            if rows_after is None:
+                return fail("chg-verify", "list charges failed after update")
+            diffs = []
+            for r in rows_after:
+                before = amt_before.get(r["record_id"])
+                after = to_num((r.get("fields") or {}).get("AMOUNT (HKD)"))
+                if before is None or abs(after - before) > 0.005:
+                    diffs.append({"record_id": r["record_id"],
+                                  "before": before, "after": after})
+            print(json.dumps({"stage": "fx-overhaul-verify", "rows": len(rows_after),
+                              "diffs": diffs},
+                             ensure_ascii=False))
+            if diffs:
+                return fail("chg-verify",
+                            "AMOUNT changed on rows with no rate override — rollback via fix-amount-formula",
+                            {"diffs": diffs})
+        print(json.dumps({"stage": "fx-overhaul-done", "dry_run": False,
+                          "rate_field_id": rate_fid},
                          ensure_ascii=False))
         return 0
 
