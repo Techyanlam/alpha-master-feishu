@@ -44,6 +44,9 @@ Commands:
   build-booking-table          Create the 客人落單認讀 table (AI recognition
                                staging for customer bookings) with all fields.
                                Idempotent; AI shortcuts are attached in the UI.
+  build-ports-table            Create the 港口 master table (POL/POD list for
+                               the website New Case dropdowns + case filter)
+                               with seed ports. Idempotent.
   add-booking-case-link        Add the 個案 link field to 客人落單認讀 (linking
                                each recognised booking to its 個案主表 row;
                                back-link 客人落單認讀 appears in 個案主表).
@@ -944,6 +947,109 @@ def main():
             ok = ok and res.get("code") == 0
         print(json.dumps({"stage": "build-booking-table-done", "table": TABLE_NAME,
                           "table_id": tid, "field_count": len(FIELDS)},
+                         ensure_ascii=False))
+        return 0 if ok else 1
+
+    if cmd == "build-ports-table":
+        # New table 港口 (2026-11-21, per 2026-11-20 client meeting: POL/POD
+        # master list — creatable, selectable in New Case, cases filterable
+        # by port). One row per port; 代碼 is what gets written into a case's
+        # POL/POD (air: IATA code; sea: the English name in caps, matching
+        # historical case values). Idempotent: table/fields/seed rows are
+        # reused, never duplicated.
+        TABLE_NAME = "港口"
+        FIELDS = [
+            ("港口名稱", 1, None),
+            ("代碼", 1, None),
+            ("類型", 3, {"options": [{"name": "機場", "color": 0},
+                                      {"name": "海港", "color": 1}]}),
+            ("國家／地區", 1, None),
+        ]
+        SEED = [
+            ("香港國際機場", "HKG", "機場", "香港"),
+            ("廣州白雲機場", "CAN", "機場", "中國"),
+            ("首爾仁川機場", "ICN", "機場", "韓國"),
+            ("東京成田機場", "NRT", "機場", "日本"),
+            ("法蘭克福機場", "FRA", "機場", "德國"),
+            ("新加坡樟宜機場", "SIN", "機場", "新加坡"),
+            ("墨西哥城機場", "MEX", "機場", "墨西哥"),
+            ("香港港口", "HKG", "海港", "香港"),
+            ("奧克蘭港", "OAKLAND", "海港", "美國"),
+            ("基隆港", "KEELUNG", "海港", "台灣"),
+            ("台北港", "TAIPEI", "海港", "台灣"),
+        ]
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        if TABLE_NAME in by_name:
+            tid = by_name[TABLE_NAME]
+            is_new = False
+            print(json.dumps({"stage": "build-ports-table", "table": TABLE_NAME,
+                              "result": "EXISTS-REUSE", "table_id": tid},
+                             ensure_ascii=False))
+        else:
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables",
+                       token, payload={"table": {"name": TABLE_NAME}})
+            if res.get("code") != 0:
+                print(json.dumps({"stage": "build-ports-table", "table": TABLE_NAME,
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                return 1
+            tid = res["data"]["table_id"]
+            is_new = True
+            print(json.dumps({"stage": "build-ports-table", "table": TABLE_NAME,
+                              "result": "CREATED", "table_id": tid},
+                             ensure_ascii=False))
+        fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        items = fres.get("data", {}).get("items", []) if fres.get("code") == 0 else []
+        existing = {f["field_name"] for f in items}
+        todo = list(FIELDS)
+        if is_new and len(items) == 1 and items[0].get("type") == 1 and todo and todo[0][1] == 1:
+            fid = items[0]["field_id"]
+            res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields/{fid}",
+                       token, payload={"field_name": todo[0][0], "type": 1})
+            print(json.dumps({"stage": "build-ports-table", "field": todo[0][0],
+                              "result": "REUSE-PRIMARY-FIELD",
+                              "code": res.get("code"), "msg": res.get("msg")},
+                             ensure_ascii=False))
+            todo = todo[1:]
+            existing.add(FIELDS[0][0])
+        ok = True
+        for name, ftype, prop in todo:
+            if name in existing:
+                print(json.dumps({"stage": "build-ports-table", "field": name,
+                                  "result": "EXISTS-SKIP"}, ensure_ascii=False))
+                continue
+            payload = {"field_name": name, "type": ftype}
+            if prop is not None:
+                payload["property"] = prop
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                       token, payload=payload)
+            print(json.dumps({"stage": "build-ports-table", "field": name,
+                              "type": ftype, "code": res.get("code"),
+                              "msg": res.get("msg"),
+                              "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
+                             ensure_ascii=False))
+            ok = ok and res.get("code") == 0
+        # Seed rows (idempotent by 港口名稱).
+        recs = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records?page_size=100", token)
+        have = {(r.get("fields", {}) or {}).get("港口名稱")
+                for r in (recs.get("data", {}) or {}).get("items") or []}
+        seeded = 0
+        for pname, code, ptype, country in SEED:
+            if pname in have:
+                continue
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records",
+                       token, payload={"fields": {"港口名稱": pname, "代碼": code,
+                                                  "類型": ptype, "國家／地區": country}})
+            print(json.dumps({"stage": "build-ports-table", "seed": pname,
+                              "code": res.get("code"), "msg": res.get("msg")},
+                             ensure_ascii=False))
+            ok = ok and res.get("code") == 0
+            seeded += 1
+        print(json.dumps({"stage": "build-ports-table-done", "table": TABLE_NAME,
+                          "table_id": tid, "field_count": len(FIELDS),
+                          "seeded": seeded},
                          ensure_ascii=False))
         return 0 if ok else 1
 
