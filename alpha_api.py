@@ -1061,6 +1061,102 @@ def main():
                          ensure_ascii=False))
         return 0 if ok else 1
 
+    if cmd == "build-quotation-table":
+        # New table 報價 (2026-11-22, Quotation independent module per the
+        # 2026-11-20 client meeting + design proposal): quotations get their
+        # own records/numbering/files/status, separate from cases/invoices.
+        # Quotation No. is assigned by the Worker (AMQ+YYMM+3-digit).
+        # Idempotent: table/fields are reused, never duplicated.
+        TABLE_NAME = "報價"
+        CUST_TID = "tblR42JpV1DVmhzo"   # 客戶
+        CASE_TID = "tbl1VaAfjwnbvk8j"   # 個案主表
+        DATE_PROP = {"auto_fill": False, "date_formatter": "yyyy/MM/dd"}
+        FIELDS = [
+            ("Quotation No.", 1, None),
+            ("客戶", 21, {"table_id": CUST_TID, "back_field_name": "報價"}),
+            ("報價類別", 3, {"options": [{"name": "跟Job報價", "color": 0},
+                                        {"name": "長期報價", "color": 1}]}),
+            ("報價日期", 5, DATE_PROP),
+            ("有效期至", 5, DATE_PROP),
+            ("業務類型", 3, {"options": [{"name": "空運", "color": 0},
+                                        {"name": "海運", "color": 1},
+                                        {"name": "本地派送", "color": 2},
+                                        {"name": "物流服務", "color": 3}]}),
+            ("方向", 3, {"options": [{"name": "出口", "color": 0},
+                                    {"name": "進口", "color": 1}]}),
+            ("POL", 1, None),
+            ("POD", 1, None),
+            ("收費項目", 1, None),
+            ("收費摘要", 1, None),
+            ("總額HKD", 2, {"formatter": "0.00"}),
+            ("狀態", 3, {"options": [{"name": "草稿", "color": 0},
+                                    {"name": "已發送", "color": 1},
+                                    {"name": "Awarded", "color": 2},
+                                    {"name": "Rejected", "color": 3}]}),
+            ("連結個案", 21, {"table_id": CASE_TID, "back_field_name": "來源報價"}),
+            ("報價檔案", 17, None),
+            ("備註", 1, None),
+            ("建立人", 1003, None),
+            ("建立時間", 1001, {"date_formatter": "yyyy/MM/dd HH:mm"}),
+        ]
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        if TABLE_NAME in by_name:
+            tid = by_name[TABLE_NAME]
+            is_new = False
+            print(json.dumps({"stage": "build-quotation-table", "table": TABLE_NAME,
+                              "result": "EXISTS-REUSE", "table_id": tid},
+                             ensure_ascii=False))
+        else:
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables",
+                       token, payload={"table": {"name": TABLE_NAME}})
+            if res.get("code") != 0:
+                print(json.dumps({"stage": "build-quotation-table", "table": TABLE_NAME,
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                return 1
+            tid = res["data"]["table_id"]
+            is_new = True
+            print(json.dumps({"stage": "build-quotation-table", "table": TABLE_NAME,
+                              "result": "CREATED", "table_id": tid},
+                             ensure_ascii=False))
+        fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        items = fres.get("data", {}).get("items", []) if fres.get("code") == 0 else []
+        existing = {f["field_name"] for f in items}
+        todo = list(FIELDS)
+        if is_new and len(items) == 1 and items[0].get("type") == 1 and todo and todo[0][1] == 1:
+            fid = items[0]["field_id"]
+            res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields/{fid}",
+                       token, payload={"field_name": todo[0][0], "type": 1})
+            print(json.dumps({"stage": "build-quotation-table", "field": todo[0][0],
+                              "result": "REUSE-PRIMARY-FIELD",
+                              "code": res.get("code"), "msg": res.get("msg")},
+                             ensure_ascii=False))
+            todo = todo[1:]
+            existing.add(FIELDS[0][0])
+        ok = True
+        for name, ftype, prop in todo:
+            if name in existing:
+                print(json.dumps({"stage": "build-quotation-table", "field": name,
+                                  "result": "EXISTS-SKIP"}, ensure_ascii=False))
+                continue
+            payload = {"field_name": name, "type": ftype}
+            if prop is not None:
+                payload["property"] = prop
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                       token, payload=payload)
+            print(json.dumps({"stage": "build-quotation-table", "field": name,
+                              "type": ftype, "code": res.get("code"),
+                              "msg": res.get("msg"),
+                              "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
+                             ensure_ascii=False))
+            ok = ok and res.get("code") == 0
+        print(json.dumps({"stage": "build-quotation-table-done", "table": TABLE_NAME,
+                          "table_id": tid, "field_count": len(FIELDS)},
+                         ensure_ascii=False))
+        return 0 if ok else 1
+
     if cmd == "add-booking-case-link":
         # Link recognised bookings to their case (2026-11-16, Yan: 認完之後
         # 連結個案主表). Adds a TwoWayLink field 個案 to 客人落單認讀
