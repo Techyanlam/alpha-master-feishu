@@ -47,6 +47,8 @@ Commands:
   build-ports-table            Create the 港口 master table (POL/POD list for
                                the website New Case dropdowns + case filter)
                                with seed ports. Idempotent.
+  build-quotation-table        Create the 報價 table for the Quotation
+                               independent module (2026-11-22). Idempotent.
   add-booking-case-link        Add the 個案 link field to 客人落單認讀 (linking
                                each recognised booking to its 個案主表 row;
                                back-link 客人落單認讀 appears in 個案主表).
@@ -85,6 +87,7 @@ Commands:
                                (rate>0 wins, else CNY 1.153 / USD 7.85 / x1).
                                Verifies every charge AMOUNT is unchanged.
   add-invoice-creator-fields Add 建立人 (CreatedBy) + 建立時間 (CreatedTime)
+  add-quotation-doc-fields Add 客戶名稱 + DocG process (Text) to 報價 + backfill
                                system fields to the 發票 table (idempotent).
                                (fldAw7AN1L) with an FX-aware one that
                                always uses the row's own QTY: CNY x1.153,
@@ -2503,6 +2506,74 @@ def main():
                            "created": f.get("建立時間")})
         print(json.dumps({"stage": "add-invoice-creator-fields-verify",
                           "rows": len(rows), "sample": sample}, ensure_ascii=False))
+        return 0
+
+    if cmd == "add-quotation-doc-fields":
+        # 2026-11-22 (Yan chose the Feishu DocuGenius route for quotation
+        # auto-generation): the 報價 table gains two Text fields —
+        # 「客戶名稱」 (denormalized customer name, written by the Worker at
+        # creation, so the DocuGenius template can bind a plain text field
+        # instead of the 客戶 link) and 「DocG process」 (the automation's
+        # background-run status field, mirroring the case table).
+        # Idempotent by field name; backfills 客戶名稱 for existing rows
+        # from their 客戶 link.
+        tid = "tblLS6eeBS9WUj9u"  # 報價
+        cust_tid = "tblR42JpV1DVmhzo"  # 客戶
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "add-quotation-doc-fields", "step": "list-fields",
+                              "code": res.get("code"), "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        items = res.get("data", {}).get("items", [])
+        existing = {f["field_name"] for f in items}
+        for name in ["客戶名稱", "DocG process"]:
+            if name in existing:
+                print(json.dumps({"stage": "create-field", "field": name,
+                                  "result": "EXISTS"}, ensure_ascii=False))
+                continue
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                       token, payload={"field_name": name, "type": 1})
+            print(json.dumps({"stage": "create-field", "field": name, "type": 1,
+                              "code": res.get("code"), "msg": res.get("msg"),
+                              "field_id": ((res.get("data") or {}).get("field") or {}).get("field_id")},
+                             ensure_ascii=False))
+            if res.get("code") != 0:
+                return 1
+
+        def _txt(v):
+            if isinstance(v, str):
+                return v
+            if isinstance(v, list):
+                return "".join((x.get("text", "") if isinstance(x, dict) else str(x)) for x in v)
+            return ""
+
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{cust_tid}/records?page_size=100", token)
+        cust_rows = (res.get("data", {}) or {}).get("items") or []
+        cust_name = {r.get("record_id"): _txt((r.get("fields", {}) or {}).get("公司名稱")) for r in cust_rows}
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records?page_size=100", token)
+        rows = (res.get("data", {}) or {}).get("items") or []
+        filled, skipped = [], []
+        for r in rows:
+            f = r.get("fields", {}) or {}
+            if _txt(f.get("客戶名稱")):
+                continue
+            link = f.get("客戶") or []
+            ids = []
+            if isinstance(link, list):
+                for x in link:
+                    if isinstance(x, dict):
+                        ids.extend(x.get("record_ids") or [])
+            nm = cust_name.get(ids[0]) if ids else ""
+            if not nm:
+                skipped.append(r.get("record_id"))
+                continue
+            res2 = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records/{r.get('record_id')}",
+                        token, payload={"fields": {"客戶名稱": nm}})
+            filled.append({"record_id": r.get("record_id"), "no": f.get("Quotation No."),
+                           "name": nm, "code": res2.get("code")})
+        print(json.dumps({"stage": "add-quotation-doc-fields-verify",
+                          "rows": len(rows), "backfilled": filled, "skipped": skipped},
+                         ensure_ascii=False))
         return 0
 
     if cmd == "add-invoice-attach-fields":
