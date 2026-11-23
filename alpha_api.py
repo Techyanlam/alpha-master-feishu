@@ -53,6 +53,8 @@ Commands:
                                username login (2026-11-23) + seed accounts
                                (admin/IT/Iris/Johnson/Queenie, no passwords —
                                hashes are seeded via the Worker). Idempotent.
+  add-users-security-field     Add the 保安狀態 text field to 使用者 (login
+                               brute-force lockout state, JSON). Idempotent.
   add-booking-case-link        Add the 個案 link field to 客人落單認讀 (linking
                                each recognised booking to its 個案主表 row;
                                back-link 客人落單認讀 appears in 個案主表).
@@ -2617,6 +2619,35 @@ def main():
                           "table_id": tid, "field_count": len(FIELDS),
                           "seed_count": len(SEED)}, ensure_ascii=False))
         return 0 if ok else 1
+
+    if cmd == "add-users-security-field":
+        # Login brute-force lockout state (2026-11-23): one Text field on
+        # 使用者 holding JSON {"f": failCount, "l": lockedUntilMs}; the
+        # Worker locks an account for 15 min after 5 consecutive failures.
+        TABLE_NAME = "使用者"
+        FIELD = ("保安狀態", 1, None)
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        if TABLE_NAME not in by_name:
+            print(json.dumps({"stage": "add-users-security-field",
+                              "error": "users table not found"}, ensure_ascii=False))
+            return 1
+        tid = by_name[TABLE_NAME]
+        fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        items = fres.get("data", {}).get("items", []) if fres.get("code") == 0 else []
+        existing = {f["field_name"] for f in items}
+        if FIELD[0] in existing:
+            print(json.dumps({"stage": "add-users-security-field", "field": FIELD[0],
+                              "result": "EXISTS-SKIP", "table_id": tid}, ensure_ascii=False))
+            return 0
+        res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                   token, payload={"field_name": FIELD[0], "type": FIELD[1]})
+        print(json.dumps({"stage": "add-users-security-field", "field": FIELD[0],
+                          "code": res.get("code"), "msg": res.get("msg"),
+                          "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id"),
+                          "table_id": tid}, ensure_ascii=False))
+        return 0 if res.get("code") == 0 else 1
 
     if cmd == "add-quotation-doc-fields":
         # 2026-11-22 (Yan chose the Feishu DocuGenius route for quotation
