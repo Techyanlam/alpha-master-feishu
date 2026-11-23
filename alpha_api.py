@@ -49,6 +49,10 @@ Commands:
                                with seed ports. Idempotent.
   build-quotation-table        Create the 報價 table for the Quotation
                                independent module (2026-11-22). Idempotent.
+  build-users-table            Create the 使用者 table for the website
+                               username login (2026-11-23) + seed accounts
+                               (admin/IT/Iris/Johnson/Queenie, no passwords —
+                               hashes are seeded via the Worker). Idempotent.
   add-booking-case-link        Add the 個案 link field to 客人落單認讀 (linking
                                each recognised booking to its 個案主表 row;
                                back-link 客人落單認讀 appears in 個案主表).
@@ -2507,6 +2511,112 @@ def main():
         print(json.dumps({"stage": "add-invoice-creator-fields-verify",
                           "rows": len(rows), "sample": sample}, ensure_ascii=False))
         return 0
+
+    if cmd == "build-users-table":
+        # Website username login (2026-11-23, Yan): accounts live in a
+        # Feishu table so Yan can disable a leaver's account directly.
+        # Passwords are NEVER stored in plaintext — the Worker stores a
+        # PBKDF2 hash in 密碼雜湊, seeded via its one-time seed endpoint;
+        # this command only creates the table + account rows (empty hash,
+        # 需改密碼 = true). Idempotent by table name, field name, Username.
+        TABLE_NAME = "使用者"
+        FIELDS = [
+            ("Username", 1, None),
+            ("顯示名稱", 1, None),
+            ("密碼雜湊", 1, None),
+            ("角色", 3, {"options": [{"name": "管理員", "color": 0},
+                                   {"name": "一般", "color": 1}]}),
+            ("啟用", 7, None),
+            ("需改密碼", 7, None),
+            ("最後登入", 5, {"auto_fill": False, "date_formatter": "yyyy/MM/dd HH:mm"}),
+        ]
+        SEED = [
+            ("admin", "Admin", "管理員"),
+            ("IT", "IT", "管理員"),
+            ("Iris", "Iris", "一般"),
+            ("Johnson", "Johnson", "一般"),
+            ("Queenie", "Queenie", "一般"),
+        ]
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        if TABLE_NAME in by_name:
+            tid = by_name[TABLE_NAME]
+            is_new = False
+            print(json.dumps({"stage": "build-users-table", "table": TABLE_NAME,
+                              "result": "EXISTS-REUSE", "table_id": tid},
+                             ensure_ascii=False))
+        else:
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables",
+                       token, payload={"table": {"name": TABLE_NAME}})
+            if res.get("code") != 0:
+                print(json.dumps({"stage": "build-users-table", "table": TABLE_NAME,
+                                  "code": res.get("code"), "msg": res.get("msg")},
+                                 ensure_ascii=False))
+                return 1
+            tid = res["data"]["table_id"]
+            is_new = True
+            print(json.dumps({"stage": "build-users-table", "table": TABLE_NAME,
+                              "result": "CREATED", "table_id": tid},
+                             ensure_ascii=False))
+        fres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        items = fres.get("data", {}).get("items", []) if fres.get("code") == 0 else []
+        existing = {f["field_name"] for f in items}
+        todo = list(FIELDS)
+        if is_new and len(items) == 1 and items[0].get("type") == 1 and todo and todo[0][1] == 1:
+            fid = items[0]["field_id"]
+            res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields/{fid}",
+                       token, payload={"field_name": todo[0][0], "type": 1})
+            print(json.dumps({"stage": "build-users-table", "field": todo[0][0],
+                              "result": "REUSE-PRIMARY-FIELD",
+                              "code": res.get("code"), "msg": res.get("msg")},
+                             ensure_ascii=False))
+            todo = todo[1:]
+            existing.add(FIELDS[0][0])
+        ok = True
+        for name, ftype, prop in todo:
+            if name in existing:
+                print(json.dumps({"stage": "build-users-table", "field": name,
+                                  "result": "EXISTS-SKIP"}, ensure_ascii=False))
+                continue
+            payload = {"field_name": name, "type": ftype}
+            if prop is not None:
+                payload["property"] = prop
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                       token, payload=payload)
+            print(json.dumps({"stage": "build-users-table", "field": name,
+                              "type": ftype, "code": res.get("code"),
+                              "msg": res.get("msg"),
+                              "field_id": (res.get("data", {}) or {}).get("field", {}).get("field_id")},
+                             ensure_ascii=False))
+            ok = ok and res.get("code") == 0
+        rres = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records?page_size=100", token)
+        rows = (rres.get("data", {}) or {}).get("items") or []
+        have = set()
+        for r in rows:
+            v = (r.get("fields", {}) or {}).get("Username")
+            if isinstance(v, str):
+                have.add(v.lower())
+            elif isinstance(v, list):
+                have.add("".join((x.get("text", "") if isinstance(x, dict) else str(x)) for x in v).lower())
+        for uname, disp, role in SEED:
+            if uname.lower() in have:
+                print(json.dumps({"stage": "build-users-table", "seed": uname,
+                                  "result": "EXISTS-SKIP"}, ensure_ascii=False))
+                continue
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records",
+                       token, payload={"fields": {"Username": uname, "顯示名稱": disp,
+                                                  "密碼雜湊": "", "角色": role,
+                                                  "啟用": True, "需改密碼": True}})
+            print(json.dumps({"stage": "build-users-table", "seed": uname,
+                              "code": res.get("code"), "msg": res.get("msg"),
+                              "record_id": ((res.get("data") or {}).get("record") or {}).get("record_id")},
+                             ensure_ascii=False))
+            ok = ok and res.get("code") == 0
+        print(json.dumps({"stage": "build-users-table-done", "table": TABLE_NAME,
+                          "table_id": tid, "field_count": len(FIELDS),
+                          "seed_count": len(SEED)}, ensure_ascii=False))
+        return 0 if ok else 1
 
     if cmd == "add-quotation-doc-fields":
         # 2026-11-22 (Yan chose the Feishu DocuGenius route for quotation
