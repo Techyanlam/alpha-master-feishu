@@ -68,6 +68,13 @@ Commands:
                                (case ref, Charge 名稱) to expose duplicates.
   dedup-charges [delete]       Delete duplicate 收費明細 rows (keep first);
                                dry-run unless arg is exactly "delete".
+  fix-orphan-status [run]    Migrate 個案主表 rows whose 狀態 is the deleted
+                               option "已下單" to "客人已下單" (2026-11-24:
+                               Yan renamed the 狀態 options in Feishu; the
+                               old option is gone so those rows are orphaned).
+                               Dry-run unless arg is exactly "run". NOTE:
+                               flipping to 客人已下單 fires the HAWB/HBL
+                               DocuGenius automations for air-export cases.
   auto-create-cases [run]       Scan 客人落單認讀 for rows with 認讀狀態
                                開案 and no linked case; use the row's
                                Reference No. (Numbering field) as the
@@ -2859,6 +2866,59 @@ def main():
             ok = ok and n == 0
         print(json.dumps({"stage": "clear-all-done", "verified_empty": ok}, ensure_ascii=False))
         return 0 if ok else 1
+
+    if cmd == "fix-orphan-status":
+        # 2026-11-24: Yan renamed the 狀態 options in Feishu (9 -> 8:
+        # 報價/客人已下單/向供應商落單/生成提單/已完成/開票/已收款/結案).
+        # The old "已下單" option was deleted, so rows still carrying it are
+        # orphaned values. Move them to the surviving equivalent 客人已下單.
+        # DRY-RUN unless arg == "run". NOTE: writing 客人已下單 triggers the
+        # HAWB/HBL DocuGenius automations for air-export cases.
+        do_apply = len(sys.argv) > 3 and sys.argv[3] == "run"
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        case_tid = by_name.get("個案主表")
+
+        def all_records(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}"
+                       f"/records?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    return out
+                d = res.get("data", {})
+                out.extend(d.get("items", []))
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        rows = all_records(case_tid)
+        orphans = [{"ref": r["fields"].get("Reference No."),
+                    "record_id": r["record_id"]}
+                   for r in rows if r["fields"].get("狀態") == "已下單"]
+        updated, failed = [], []
+        if do_apply:
+            for item in orphans:
+                res = call("PUT",
+                           f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}"
+                           f"/records/{item['record_id']}", token,
+                           payload={"fields": {"狀態": "客人已下單"}})
+                (updated if res.get("code") == 0
+                 else failed).append(item["ref"])
+        remaining = [r["fields"].get("Reference No.")
+                     for r in all_records(case_tid)
+                     if r["fields"].get("狀態") == "已下單"] if do_apply else None
+        print(json.dumps({"stage": "fix-orphan-status", "dry_run": not do_apply,
+                          "found": len(orphans),
+                          "refs": [o["ref"] for o in orphans],
+                          "updated": updated, "failed": failed,
+                          "remaining_orphans": remaining},
+                         ensure_ascii=False, indent=1))
+        return 0 if not failed and (remaining is None or len(remaining) == 0) else 1
 
     if cmd == "update-record":
         # One-record field update: update-record <table_id> <record_id>
