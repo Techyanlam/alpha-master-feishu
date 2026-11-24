@@ -101,6 +101,15 @@ Commands:
                                Verifies every charge AMOUNT is unchanged.
   add-invoice-creator-fields Add 建立人 (CreatedBy) + 建立時間 (CreatedTime)
   add-quotation-doc-fields Add 客戶名稱 + DocG process (Text) to 報價 + backfill
+  add-invoice-doc-field      Recreate the deleted Invoice (Doc) Text field
+                               on 個案主表 (idempotent). The Invoice / HAWB /
+                               HBL / MAWB automations write their background
+                               status there; the field was deleted, so the
+                               writes go nowhere. NOTE: automations reference
+                               fields by id, so a recreated field gets a new
+                               id — verify in the automation editor afterwards
+                               whether the reference resolves or still shows
+                               the old field as missing.
                                system fields to the 發票 table (idempotent).
                                (fldAw7AN1L) with an FX-aware one that
                                always uses the row's own QTY: CNY x1.153,
@@ -2723,6 +2732,45 @@ def main():
                           "rows": len(rows), "backfilled": filled, "skipped": skipped},
                          ensure_ascii=False))
         return 0
+
+    if cmd == "add-invoice-doc-field":
+        # 2026-11-24 (Yan chose option A after the bug sweep): recreate
+        # the deleted 「Invoice (Doc)」 Text field on 個案主表. The
+        # Invoice / HAWB / HBL / MAWB DocuGenius automations write their
+        # background-run status to this field; it was deleted at some
+        # point, so those writes go nowhere (the documents themselves
+        # still generate into their own Attachment fields). Mirrors the
+        # existing 「Quotation (Doc)」 Text field, which the Quotation
+        # Automation still writes to successfully. Idempotent by name.
+        tid = "tbl1VaAfjwnbvk8j"  # 個案主表
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "add-invoice-doc-field", "step": "list-fields",
+                              "code": res.get("code"), "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        items = res.get("data", {}).get("items", [])
+        for f in items:
+            if f["field_name"] == "Invoice (Doc)":
+                print(json.dumps({"stage": "add-invoice-doc-field", "field": "Invoice (Doc)",
+                                  "result": "EXISTS", "field_id": f.get("field_id"),
+                                  "type": f.get("type")}, ensure_ascii=False))
+                return 0
+        res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                   token, payload={"field_name": "Invoice (Doc)", "type": 1})
+        print(json.dumps({"stage": "create-field", "field": "Invoice (Doc)", "type": 1,
+                          "code": res.get("code"), "msg": res.get("msg"),
+                          "field_id": ((res.get("data") or {}).get("field") or {}).get("field_id")},
+                         ensure_ascii=False))
+        if res.get("code") != 0:
+            return 1
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        items = (res.get("data", {}) or {}).get("items", [])
+        found = [f for f in items if f["field_name"] == "Invoice (Doc)"]
+        print(json.dumps({"stage": "add-invoice-doc-field-verify",
+                          "total_fields": len(items),
+                          "found": [{"field_id": f.get("field_id"), "type": f.get("type")}
+                                    for f in found]}, ensure_ascii=False))
+        return 0 if found and found[0].get("type") == 1 else 1
 
     if cmd == "add-invoice-attach-fields":
         # 2026-11-20 (Yan): the 發票 table gains two Attachment fields —
