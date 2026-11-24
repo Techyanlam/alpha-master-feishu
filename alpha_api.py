@@ -100,6 +100,10 @@ Commands:
                                (rate>0 wins, else CNY 1.153 / USD 7.85 / x1).
                                Verifies every charge AMOUNT is unchanged.
   add-invoice-creator-fields Add 建立人 (CreatedBy) + 建立時間 (CreatedTime)
+  add-case-created-field     Add 建立時間 (CreatedTime, system field) to
+                               個案主表 (idempotent). Feishu backfills it for
+                               existing records, so the website Cases list
+                               can show each case's Create Date.
   add-quotation-doc-fields Add 客戶名稱 + DocG process (Text) to 報價 + backfill
   add-invoice-doc-field      Recreate the deleted Invoice (Doc) Text field
                                on 個案主表 (idempotent). The Invoice / HAWB /
@@ -2527,6 +2531,50 @@ def main():
                            "creator": f.get("建立人"),
                            "created": f.get("建立時間")})
         print(json.dumps({"stage": "add-invoice-creator-fields-verify",
+                          "rows": len(rows), "sample": sample}, ensure_ascii=False))
+        return 0
+
+    if cmd == "add-case-created-field":
+        # 2026-11-24 (Yan: Cases list Create Date column): the 個案主表 gains
+        # the system field 建立時間 (CreatedTime, type 1001) so each case has
+        # a real creation date. Idempotent by field name. Feishu backfills
+        # the value for existing records. NOTE: the Feishu list-records API
+        # does NOT return record.created_time, so the Worker cannot read the
+        # creation date without this field (v1.0.31 showed "—" for all rows).
+        tid = "tbl1VaAfjwnbvk8j"  # 個案主表
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields?page_size=100", token)
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "add-case-created-field", "step": "list-fields",
+                              "code": res.get("code"), "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        items = res.get("data", {}).get("items", [])
+        existing = {f["field_name"] for f in items}
+        print(json.dumps({"stage": "add-case-created-field-start",
+                          "existing_count": len(existing),
+                          "fields": sorted(existing)}, ensure_ascii=False))
+        name, ftype, prop = ("建立時間", 1001, {"date_formatter": "yyyy/MM/dd HH:mm"})
+        if name in existing:
+            print(json.dumps({"stage": "create-field", "field": name,
+                              "result": "EXISTS"}, ensure_ascii=False))
+        else:
+            payload = {"field_name": name, "type": ftype, "property": prop}
+            res = call("POST", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/fields",
+                       token, payload=payload)
+            print(json.dumps({"stage": "create-field", "field": name, "type": ftype,
+                              "code": res.get("code"), "msg": res.get("msg"),
+                              "field_id": ((res.get("data") or {}).get("field") or {}).get("field_id")},
+                             ensure_ascii=False))
+            if res.get("code") != 0:
+                return 1
+        res = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}/records?page_size=20", token)
+        rows = (res.get("data", {}) or {}).get("items") or []
+        sample = []
+        for r in rows[:5]:
+            f = r.get("fields", {}) or {}
+            sample.append({"record_id": r.get("record_id"),
+                           "ref": f.get("Reference No."),
+                           "created": f.get("建立時間")})
+        print(json.dumps({"stage": "add-case-created-field-verify",
                           "rows": len(rows), "sample": sample}, ensure_ascii=False))
         return 0
 
