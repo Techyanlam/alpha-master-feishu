@@ -708,7 +708,7 @@ def main():
                              ensure_ascii=False))
         else:
             fields = {"Reference No.": "TEST-LEAK-001", "業務類型": "空運",
-                      "方向": "出口", "狀態": "已開票", "Shipper": "TEST",
+                      "方向": "出口", "狀態": "開票", "Shipper": "TEST",
                       "Consignee": "TEST", "POL": "HKG", "POD": "SIN",
                       "Flight／Vessel＋Voyage": "TEST123", "ETD": today_ms,
                       "PCS": 1, "Gross Weight": 10,
@@ -1625,7 +1625,7 @@ def main():
             if not ref or not isinstance(ref, str):
                 skipped.append({"booking": b["record_id"], "reason": "NO-REF"})
                 continue
-            case_fields = {"Reference No.": ref, "狀態": "已下單"}
+            case_fields = {"Reference No.": ref, "狀態": "客人已下單"}
             if not blank(btype):
                 case_fields["業務類型"] = btype
             if not blank(direction):
@@ -1714,9 +1714,9 @@ def main():
                 if k in inv}
             expected_totals[ref] = s["expected_total_hkd"]
         names040 = sorted(n for (r, n) in seed_charges if r == "AMLA2606040")
-        target_status = {"AMLA2606040": "已開票",
-                         "AML202611003": "已下單",
-                         "AML202611004": "已下單"}
+        target_status = {"AMLA2606040": "開票",
+                         "AML202611003": "客人已下單",
+                         "AML202611004": "客人已下單"}
         empty_rid = "reczz28abUPqE7OJ"
         print(json.dumps({"stage": "repair-20261119-start", "dry_run": not do_run,
                           "target": "2026-11-16 verified snapshot (alpha_seed.json + alpha_seed_all.json)",
@@ -1949,7 +1949,7 @@ def main():
         if not do_run:
             print(json.dumps({"stage": "repair-20261119-d", "dry_run": True,
                               "rows": plan_d,
-                              "warning": "AMLA2606040 → 已開票 will re-trigger the Feishu Invoice Automation: it generates the 客人發票 PDF again and APPENDS it to the case's Invoice attachment field; the earlier PDF is NOT deleted."},
+                              "warning": "AMLA2606040 → 開票 will re-trigger the Feishu Invoice Automation: it generates the 客人發票 PDF again and APPENDS it to the case's Invoice attachment field; the earlier PDF is NOT deleted."},
                              ensure_ascii=False))
         else:
             updated = []
