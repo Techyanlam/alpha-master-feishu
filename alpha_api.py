@@ -3030,6 +3030,111 @@ def main():
                           "msg": res.get("msg")}, ensure_ascii=False))
         return 0 if res.get("code") == 0 else 1
 
+    if cmd == "attach-quote-file":
+        # One-off: attach a quotation's 報價檔案 (PDF) to its linked case's
+        # Quotation field. Usage: attach-quote-file "AMQ2611008 AMLA2611014"
+        # (quotation no. + case ref, one arg). Finds both records by their
+        # number fields, merges the file tokens into the case's Quotation
+        # attachment (dedupe, keeps existing files), verifies by re-reading.
+        # Idempotent: re-running attaches nothing new.
+        parts = (sys.argv[3] if len(sys.argv) > 3 else "").split()
+        if len(parts) != 2:
+            print(json.dumps({"stage": "attach-quote-file", "result": "REFUSED",
+                              "reason": "usage: attach-quote-file '<quotation_no> <case_ref>'"},
+                             ensure_ascii=False))
+            return 2
+        quote_no, case_ref = parts
+        tables = list_tables(token, app_token)
+        by_name = {t["name"]: t["table_id"]
+                   for t in tables.get("data", {}).get("items", [])}
+        quote_tid, case_tid = by_name.get("報價"), by_name.get("個案主表")
+        if not (quote_tid and case_tid):
+            print(json.dumps({"stage": "attach-quote-file", "result": "REFUSED",
+                              "reason": "missing table", "tables": sorted(by_name)},
+                             ensure_ascii=False))
+            return 1
+
+        def all_records(tid):
+            out, page_token = [], None
+            while True:
+                url = (f"{BASE}/bitable/v1/apps/{app_token}/tables/{tid}"
+                       f"/records?page_size=100")
+                if page_token:
+                    url += f"&page_token={page_token}"
+                res = call("GET", url, token)
+                if res.get("code") != 0:
+                    return None
+                d = res.get("data", {})
+                out.extend(d.get("items") or [])
+                if not d.get("has_more"):
+                    return out
+                page_token = d.get("page_token")
+
+        def file_tokens(v):
+            if not isinstance(v, list):
+                return []
+            return [a.get("file_token") for a in v
+                    if isinstance(a, dict) and a.get("file_token")]
+
+        def link_ids(v):
+            out = []
+            items = v if isinstance(v, list) else [v]
+            for x in items:
+                if isinstance(x, str):
+                    out.append(x)
+                elif isinstance(x, dict):
+                    ids = x.get("record_ids")
+                    if isinstance(ids, list):
+                        out.extend(ids)
+                    elif x.get("record_id") or x.get("id"):
+                        out.append(x.get("record_id") or x.get("id"))
+            return [i for i in out if i]
+
+        quotes = all_records(quote_tid)
+        cases = all_records(case_tid)
+        if quotes is None or cases is None:
+            print(json.dumps({"stage": "attach-quote-file", "result": "FAILED",
+                              "reason": "list records failed"}, ensure_ascii=False))
+            return 1
+        qrow = next((r for r in quotes
+                     if (r.get("fields") or {}).get("Quotation No.") == quote_no), None)
+        crow = next((r for r in cases
+                     if (r.get("fields") or {}).get("Reference No.") == case_ref), None)
+        if not qrow:
+            print(json.dumps({"stage": "attach-quote-file", "result": "NOT_FOUND",
+                              "reason": f"quotation {quote_no} not found"}, ensure_ascii=False))
+            return 1
+        if not crow:
+            print(json.dumps({"stage": "attach-quote-file", "result": "NOT_FOUND",
+                              "reason": f"case {case_ref} not found"}, ensure_ascii=False))
+            return 1
+        qf = qrow.get("fields") or {}
+        tokens = file_tokens(qf.get("報價檔案"))
+        if not tokens:
+            print(json.dumps({"stage": "attach-quote-file", "quotation": quote_no,
+                              "case": case_ref, "result": "NO_FILE",
+                              "reason": "quotation has no 報價檔案 yet"}, ensure_ascii=False))
+            return 0
+        cf = crow.get("fields") or {}
+        current = file_tokens(cf.get("Quotation")) or file_tokens(cf.get("Quotation (Attachment)"))
+        merged = list(dict.fromkeys([*current, *tokens]))
+        res = call("PUT", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records/{crow['record_id']}",
+                   token, payload={"fields": {"Quotation": [{"file_token": t} for t in merged]}})
+        if res.get("code") != 0:
+            print(json.dumps({"stage": "attach-quote-file", "code": res.get("code"),
+                              "msg": res.get("msg")}, ensure_ascii=False))
+            return 1
+        verify = call("GET", f"{BASE}/bitable/v1/apps/{app_token}/tables/{case_tid}/records/{crow['record_id']}", token)
+        vfields = ((verify.get("data") or {}).get("record") or {}).get("fields") or {}
+        vtokens = file_tokens(vfields.get("Quotation")) or file_tokens(vfields.get("Quotation (Attachment)"))
+        print(json.dumps({"stage": "attach-quote-file", "quotation": quote_no,
+                          "case": case_ref, "attached": len(tokens),
+                          "case_quotation_tokens": len(vtokens),
+                          "verified": all(t in vtokens for t in tokens),
+                          "quotation_linked_cases": link_ids(qf.get("連結個案"))},
+                         ensure_ascii=False))
+        return 0
+
     print(f"unknown command: {cmd}")
     return 2
 
